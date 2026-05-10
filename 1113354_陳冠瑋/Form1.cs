@@ -26,6 +26,9 @@ namespace _1113354_陳冠瑋
 
         private readonly List<TrackItem> _tracks = new List<TrackItem>();
         private readonly HashSet<string> _favoritePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly List<string> _recentPaths = new List<string>();
+        private readonly Dictionary<string, int> _playCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, long> _lastPlayedTicks = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         private readonly Random _random = new Random();
 
         private TrackItem _currentTrack;
@@ -82,6 +85,12 @@ namespace _1113354_陳冠瑋
         private ModernButton mBtnSaveList;
         private ModernButton mBtnLoadList;
 
+        private ModernButton mBtnViewPlaylist;
+        private ModernButton mBtnViewFavorites;
+        private ModernButton mBtnViewRecent;
+        private ModernButton mBtnViewRanking;
+        private Label mLblListTitle;
+
         private ModernButton mBtnSetA;
         private ModernButton mBtnSetB;
         private ModernButton mBtnClearAB;
@@ -101,6 +110,16 @@ namespace _1113354_陳冠瑋
 
         private ContextMenuStrip mMenu;
 
+        private enum LibraryView
+        {
+            Playlist,
+            Favorites,
+            Recent,
+            Ranking
+        }
+
+        private LibraryView _currentLibraryView = LibraryView.Playlist;
+
         public Form1()
         {
             InitializeComponent();
@@ -119,9 +138,9 @@ namespace _1113354_陳冠瑋
 
             Controls.Clear();
 
-            Text = "音訊播放器";
-            Size = new Size(1180, 760);
-            MinimumSize = new Size(1000, 650);
+            Text = "Music Library";
+            Size = new Size(1380, 820);
+            MinimumSize = new Size(1180, 700);
             StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Microsoft JhengHei UI", 10F);
             BackColor = AppColor.Bg;
@@ -135,86 +154,73 @@ namespace _1113354_陳冠瑋
 
             TableLayoutPanel root = new TableLayoutPanel();
             root.Dock = DockStyle.Fill;
-            root.Padding = new Padding(16);
+            root.Padding = new Padding(12);
             root.BackColor = AppColor.Bg;
-            root.ColumnCount = 2;
-            root.RowCount = 4;
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 285));
+            root.ColumnCount = 3;
+            root.RowCount = 3;
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250));
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 105));
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 225));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 142));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
             Controls.Add(root);
-
-            GradientPanel header = new GradientPanel();
-            header.Dock = DockStyle.Fill;
-            header.Margin = new Padding(0, 0, 0, 14);
-            header.Radius = 22;
-            header.Color1 = Color.FromArgb(70, 95, 255);
-            header.Color2 = Color.FromArgb(120, 55, 210);
-            root.Controls.Add(header, 0, 0);
-            root.SetColumnSpan(header, 2);
-
-            TableLayoutPanel headerLayout = new TableLayoutPanel();
-            headerLayout.Dock = DockStyle.Fill;
-            headerLayout.Padding = new Padding(26, 16, 26, 16);
-            headerLayout.ColumnCount = 2;
-            headerLayout.RowCount = 2;
-            headerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            headerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 240));
-            headerLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 60));
-            headerLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
-            header.Controls.Add(headerLayout);
-
-            mLblTitle = MakeLabel("音訊播放器", 24, FontStyle.Bold, Color.White);
-            mLblTitle.Dock = DockStyle.Fill;
-
-            mLblSubtitle = MakeLabel("播放清單｜MP3/MP4/WAV｜波形圖｜A/B 循環｜音訊工具箱｜統計儀表板", 10, FontStyle.Regular, Color.FromArgb(230, 235, 255));
-            mLblSubtitle.Dock = DockStyle.Fill;
-
-            mLblStats = MakeLabel("0 首｜00:00｜收藏 0", 11, FontStyle.Bold, Color.White);
-            mLblStats.Dock = DockStyle.Fill;
-            mLblStats.TextAlign = ContentAlignment.MiddleRight;
-
-            Label hotkey = MakeLabel("Space 暫停/繼續　←/→ 快轉倒退　N 下一首　P 上一首", 9, FontStyle.Regular, Color.FromArgb(232, 236, 255));
-            hotkey.Dock = DockStyle.Fill;
-            hotkey.TextAlign = ContentAlignment.MiddleRight;
-
-            headerLayout.Controls.Add(mLblTitle, 0, 0);
-            headerLayout.Controls.Add(mLblSubtitle, 0, 1);
-            headerLayout.Controls.Add(mLblStats, 1, 0);
-            headerLayout.Controls.Add(hotkey, 1, 1);
 
             CardPanel sideCard = new CardPanel();
             sideCard.Dock = DockStyle.Fill;
-            sideCard.Margin = new Padding(0, 0, 14, 14);
-            root.Controls.Add(sideCard, 0, 1);
+            sideCard.Margin = new Padding(0, 0, 12, 10);
+            sideCard.Radius = 22;
+            root.Controls.Add(sideCard, 0, 0);
 
             TableLayoutPanel side = new TableLayoutPanel();
             side.Dock = DockStyle.Fill;
             side.Padding = new Padding(16);
-            side.RowCount = 15;
+            side.RowCount = 20;
             side.ColumnCount = 1;
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
             side.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 15));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
             side.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
             side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             side.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
             sideCard.Controls.Add(side);
 
-            Label sideTitle = MakeLabel("音樂庫", 14, FontStyle.Bold, AppColor.Text);
+            Label sideTitle = MakeLabel("你的音樂庫", 16, FontStyle.Bold, AppColor.Text);
+            sideTitle.Dock = DockStyle.Fill;
+            sideTitle.TextAlign = ContentAlignment.MiddleLeft;
             side.Controls.Add(sideTitle, 0, 0);
+
+            mBtnViewPlaylist = MakeNavButton("播放清單");
+            mBtnViewFavorites = MakeNavButton("我的最愛");
+            mBtnViewRecent = MakeNavButton("近期播放");
+            mBtnViewRanking = MakeNavButton("排行版");
+            mBtnViewPlaylist.Click += delegate { SwitchLibraryView(LibraryView.Playlist); };
+            mBtnViewFavorites.Click += delegate { SwitchLibraryView(LibraryView.Favorites); };
+            mBtnViewRecent.Click += delegate { SwitchLibraryView(LibraryView.Recent); };
+            mBtnViewRanking.Click += delegate { SwitchLibraryView(LibraryView.Ranking); };
+            side.Controls.Add(mBtnViewPlaylist, 0, 1);
+            side.Controls.Add(mBtnViewFavorites, 0, 2);
+            side.Controls.Add(mBtnViewRecent, 0, 3);
+            side.Controls.Add(mBtnViewRanking, 0, 4);
+
+            Label manageTitle = MakeLabel("管理", 10, FontStyle.Bold, AppColor.SubText);
+            manageTitle.Dock = DockStyle.Fill;
+            manageTitle.TextAlign = ContentAlignment.BottomLeft;
+            side.Controls.Add(manageTitle, 0, 6);
 
             mBtnAddFiles = MakeButton("＋ 加入音訊/影片", true);
             mBtnAddFolder = MakeButton("＋ 加入整個資料夾", false);
@@ -222,37 +228,28 @@ namespace _1113354_陳冠瑋
             mBtnStopWatch = MakeButton("停止監看", false);
             mBtnCleanMissing = MakeButton("清除失效檔案", false);
 
+            mBtnAddFiles.Dock = DockStyle.Fill;
+            mBtnAddFolder.Dock = DockStyle.Fill;
+            mBtnWatchFolder.Dock = DockStyle.Fill;
+            mBtnStopWatch.Dock = DockStyle.Fill;
+            mBtnCleanMissing.Dock = DockStyle.Fill;
+
             mBtnAddFiles.Click += delegate { AddFilesFromDialog(); };
             mBtnAddFolder.Click += delegate { AddFolderFromDialog(); };
             mBtnWatchFolder.Click += delegate { ChooseWatchFolder(); };
             mBtnStopWatch.Click += delegate { StopWatchingFolder(); };
             mBtnCleanMissing.Click += delegate { CleanMissingFiles(); };
 
-            side.Controls.Add(mBtnAddFiles, 0, 1);
-            side.Controls.Add(mBtnAddFolder, 0, 2);
-            side.Controls.Add(mBtnWatchFolder, 0, 3);
-            side.Controls.Add(mBtnStopWatch, 0, 4);
-            side.Controls.Add(mBtnCleanMissing, 0, 5);
+            side.Controls.Add(mBtnAddFiles, 0, 7);
+            side.Controls.Add(mBtnAddFolder, 0, 8);
+            side.Controls.Add(mBtnWatchFolder, 0, 9);
+            side.Controls.Add(mBtnStopWatch, 0, 10);
+            side.Controls.Add(mBtnCleanMissing, 0, 11);
 
-            Label searchTitle = MakeLabel("搜尋 / 篩選", 12, FontStyle.Bold, AppColor.Text);
-            side.Controls.Add(searchTitle, 0, 7);
-
-            mTxtSearch = new TextBox();
-            mTxtSearch.Dock = DockStyle.Fill;
-            mTxtSearch.BackColor = AppColor.Input;
-            mTxtSearch.ForeColor = AppColor.Text;
-            mTxtSearch.BorderStyle = BorderStyle.FixedSingle;
-            mTxtSearch.Margin = new Padding(0, 5, 0, 5);
-            mTxtSearch.TextChanged += delegate { RefreshList(); };
-            side.Controls.Add(mTxtSearch, 0, 8);
-
-            mChkOnlyFavorite = new CheckBox();
-            mChkOnlyFavorite.Text = "只顯示收藏";
-            mChkOnlyFavorite.ForeColor = AppColor.Text;
-            mChkOnlyFavorite.BackColor = Color.Transparent;
-            mChkOnlyFavorite.Dock = DockStyle.Fill;
-            mChkOnlyFavorite.CheckedChanged += delegate { RefreshList(); };
-            side.Controls.Add(mChkOnlyFavorite, 0, 9);
+            Label settingTitle = MakeLabel("播放設定", 10, FontStyle.Bold, AppColor.SubText);
+            settingTitle.Dock = DockStyle.Fill;
+            settingTitle.TextAlign = ContentAlignment.BottomLeft;
+            side.Controls.Add(settingTitle, 0, 13);
 
             mCboLoop = new ComboBox();
             mCboLoop.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -263,42 +260,169 @@ namespace _1113354_陳冠瑋
             mCboLoop.Items.Add("清單循環");
             mCboLoop.SelectedIndex = 0;
             mCboLoop.Dock = DockStyle.Fill;
-            mCboLoop.Margin = new Padding(0, 5, 0, 5);
-            side.Controls.Add(mCboLoop, 0, 10);
+            mCboLoop.Margin = new Padding(0, 4, 0, 4);
+            side.Controls.Add(mCboLoop, 0, 14);
 
             mChkShuffle = new CheckBox();
             mChkShuffle.Text = "隨機播放";
             mChkShuffle.ForeColor = AppColor.Text;
             mChkShuffle.BackColor = Color.Transparent;
             mChkShuffle.Dock = DockStyle.Fill;
-            side.Controls.Add(mChkShuffle, 0, 12);
+            side.Controls.Add(mChkShuffle, 0, 15);
 
-            mLblWatch = MakeLabel("監看：未啟用", 9, FontStyle.Regular, AppColor.SubText);
-            mLblWatch.Dock = DockStyle.Fill;
-            mLblWatch.TextAlign = ContentAlignment.BottomLeft;
-            side.Controls.Add(mLblWatch, 0, 13);
+            mChkOnlyFavorite = new CheckBox();
+            mChkOnlyFavorite.Text = "只顯示收藏";
+            mChkOnlyFavorite.ForeColor = AppColor.Text;
+            mChkOnlyFavorite.BackColor = Color.Transparent;
+            mChkOnlyFavorite.Dock = DockStyle.Fill;
+            mChkOnlyFavorite.CheckedChanged += delegate { RefreshList(); };
+            side.Controls.Add(mChkOnlyFavorite, 0, 16);
 
-            mBtnLoadList = MakeButton("載入 M3U / TXT 清單", false);
+            mBtnLoadList = MakeButton("載入 M3U / TXT", false);
+            mBtnLoadList.Dock = DockStyle.Fill;
             mBtnLoadList.Click += delegate { LoadPlaylistFromDialog(); };
-            side.Controls.Add(mBtnLoadList, 0, 14);
+            side.Controls.Add(mBtnLoadList, 0, 17);
 
-            CardPanel listCard = new CardPanel();
-            listCard.Dock = DockStyle.Fill;
-            listCard.Margin = new Padding(0, 0, 0, 14);
-            root.Controls.Add(listCard, 1, 1);
+            mLblWatch = MakeLabel("監看：未啟用", 8, FontStyle.Regular, AppColor.SubText);
+            mLblWatch.Dock = DockStyle.Fill;
+            mLblWatch.TextAlign = ContentAlignment.MiddleLeft;
+            side.Controls.Add(mLblWatch, 0, 19);
 
-            TableLayoutPanel listLayout = new TableLayoutPanel();
-            listLayout.Dock = DockStyle.Fill;
-            listLayout.Padding = new Padding(16);
-            listLayout.RowCount = 3;
-            listLayout.ColumnCount = 1;
-            listLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-            listLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            listLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-            listCard.Controls.Add(listLayout);
+            CardPanel mainCard = new CardPanel();
+            mainCard.Dock = DockStyle.Fill;
+            mainCard.Margin = new Padding(0, 0, 12, 10);
+            mainCard.Radius = 22;
+            root.Controls.Add(mainCard, 1, 0);
 
-            Label listTitle = MakeLabel("播放清單", 14, FontStyle.Bold, AppColor.Text);
-            listLayout.Controls.Add(listTitle, 0, 0);
+            TableLayoutPanel main = new TableLayoutPanel();
+            main.Dock = DockStyle.Fill;
+            main.Padding = new Padding(16);
+            main.BackColor = AppColor.Card;
+            main.RowCount = 5;
+            main.ColumnCount = 1;
+            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 270));
+            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 226));
+            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+            main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            mainCard.Controls.Add(main);
+
+            GradientPanel hero = new GradientPanel();
+            hero.Dock = DockStyle.Fill;
+            hero.Margin = new Padding(0, 0, 0, 14);
+            hero.Radius = 20;
+            hero.Color1 = AppColor.Hero1;
+            hero.Color2 = AppColor.Hero2;
+            main.Controls.Add(hero, 0, 0);
+
+            TableLayoutPanel heroLayout = new TableLayoutPanel();
+            heroLayout.Dock = DockStyle.Fill;
+            heroLayout.Padding = new Padding(28, 20, 28, 24);
+            heroLayout.RowCount = 4;
+            heroLayout.ColumnCount = 1;
+            heroLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            heroLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+            heroLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+            heroLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
+            heroLayout.BackColor = Color.Transparent;
+            hero.Controls.Add(heroLayout);
+
+            TableLayoutPanel heroMeta = new TableLayoutPanel();
+            heroMeta.Dock = DockStyle.Fill;
+            heroMeta.ColumnCount = 2;
+            heroMeta.RowCount = 1;
+            heroMeta.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            heroMeta.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
+            heroMeta.BackColor = Color.Transparent;
+            heroLayout.Controls.Add(heroMeta, 0, 0);
+
+            mLblSubtitle = MakeLabel("本機音樂庫 · MP3 / MP4 / WAV · 波形預覽", 10, FontStyle.Bold, Color.FromArgb(222, 226, 230));
+            mLblSubtitle.Dock = DockStyle.Fill;
+            mLblSubtitle.TextAlign = ContentAlignment.MiddleLeft;
+            heroMeta.Controls.Add(mLblSubtitle, 0, 0);
+
+            mLblStats = MakeLabel("0 首｜00:00｜收藏 0", 10, FontStyle.Bold, Color.FromArgb(222, 226, 230));
+            mLblStats.Dock = DockStyle.Fill;
+            mLblStats.TextAlign = ContentAlignment.MiddleRight;
+            heroMeta.Controls.Add(mLblStats, 1, 0);
+
+            mLblTitle = MakeLabel("想聽什麼？", 26, FontStyle.Bold, Color.White);
+            mLblTitle.Dock = DockStyle.Fill;
+            mLblTitle.TextAlign = ContentAlignment.MiddleLeft;
+            heroLayout.Controls.Add(mLblTitle, 0, 1);
+
+            Panel heroSearch = new Panel();
+            heroSearch.Dock = DockStyle.Fill;
+            heroSearch.Margin = new Padding(0, 0, 0, 14);
+            heroSearch.Padding = new Padding(16, 9, 16, 5);
+            heroSearch.BackColor = Color.FromArgb(34, 34, 34);
+            heroLayout.Controls.Add(heroSearch, 0, 2);
+
+            TableLayoutPanel searchLayout = new TableLayoutPanel();
+            searchLayout.Dock = DockStyle.Fill;
+            searchLayout.ColumnCount = 2;
+            searchLayout.RowCount = 1;
+            searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 66));
+            searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            searchLayout.BackColor = Color.FromArgb(34, 34, 34);
+            heroSearch.Controls.Add(searchLayout);
+
+            Label searchIcon = MakeLabel("搜尋", 9, FontStyle.Bold, AppColor.SubText);
+            searchIcon.Dock = DockStyle.Fill;
+            searchIcon.TextAlign = ContentAlignment.MiddleLeft;
+            searchLayout.Controls.Add(searchIcon, 0, 0);
+
+            mTxtSearch = new TextBox();
+            mTxtSearch.Dock = DockStyle.Fill;
+            mTxtSearch.BackColor = Color.FromArgb(34, 34, 34);
+            mTxtSearch.ForeColor = AppColor.Text;
+            mTxtSearch.BorderStyle = BorderStyle.None;
+            mTxtSearch.Font = new Font("Microsoft JhengHei UI", 11F, FontStyle.Regular);
+            mTxtSearch.TextChanged += delegate { RefreshList(); };
+            searchLayout.Controls.Add(mTxtSearch, 1, 0);
+
+            TableLayoutPanel quickCards = new TableLayoutPanel();
+            quickCards.Dock = DockStyle.Fill;
+            quickCards.ColumnCount = 4;
+            quickCards.RowCount = 1;
+            quickCards.BackColor = AppColor.Hero2;
+            quickCards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+            quickCards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+            quickCards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+            quickCards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+
+            Control q1 = MakeQuickCard("我的最愛", "快速播放收藏曲目", AppColor.Accent, AppColor.Accent2, delegate { SwitchLibraryView(LibraryView.Favorites); });
+            Control q2 = MakeQuickCard("近期播放", "回到剛剛聽過的歌", Color.FromArgb(45, 48, 55), Color.FromArgb(70, 70, 76), delegate { SwitchLibraryView(LibraryView.Recent); });
+            Control q3 = MakeQuickCard("排行榜", "依播放次數排序", Color.FromArgb(86, 80, 255), Color.FromArgb(30, 215, 96), delegate { SwitchLibraryView(LibraryView.Ranking); });
+            Control q4 = MakeQuickCard("加入音訊", "拖曳或選擇檔案", Color.FromArgb(255, 120, 92), Color.FromArgb(255, 184, 108), delegate { AddFilesFromDialog(); });
+            q1.Dock = DockStyle.Fill;
+            q2.Dock = DockStyle.Fill;
+            q3.Dock = DockStyle.Fill;
+            q4.Dock = DockStyle.Fill;
+            quickCards.Controls.Add(q1, 0, 0);
+            quickCards.Controls.Add(q2, 1, 0);
+            quickCards.Controls.Add(q3, 2, 0);
+            quickCards.Controls.Add(q4, 3, 0);
+            heroLayout.Controls.Add(quickCards, 0, 3);
+
+            TableLayoutPanel titleRow = new TableLayoutPanel();
+            titleRow.Dock = DockStyle.Fill;
+            titleRow.ColumnCount = 2;
+            titleRow.RowCount = 1;
+            titleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            titleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+            titleRow.BackColor = Color.Transparent;
+            main.Controls.Add(titleRow, 0, 1);
+
+            mLblListTitle = MakeLabel("播放清單　0 首", 16, FontStyle.Bold, AppColor.Text);
+            mLblListTitle.Dock = DockStyle.Fill;
+            mLblListTitle.TextAlign = ContentAlignment.MiddleLeft;
+            titleRow.Controls.Add(mLblListTitle, 0, 0);
+
+            ModernButton btnDashboardInline = MakeButton("統計頁", false);
+            btnDashboardInline.Dock = DockStyle.Fill;
+            btnDashboardInline.Click += delegate { ShowDashboardPage(); };
+            titleRow.Controls.Add(btnDashboardInline, 1, 0);
 
             mList = new ListView();
             mList.Dock = DockStyle.Fill;
@@ -310,40 +434,42 @@ namespace _1113354_陳冠瑋
             mList.BackColor = AppColor.Card2;
             mList.ForeColor = AppColor.Text;
             mList.OwnerDraw = true;
-            mList.Columns.Add("", 42);
+            mList.Columns.Add("", 34);
             mList.Columns.Add("檔名", 250);
-            mList.Columns.Add("長度", 80);
-            mList.Columns.Add("格式", 110);
+            mList.Columns.Add("長度", 70);
+            mList.Columns.Add("格式", 70);
             mList.Columns.Add("取樣率", 90);
-            mList.Columns.Add("聲道", 70);
-            mList.Columns.Add("位元", 70);
-            mList.Columns.Add("大小", 85);
-            mList.Columns.Add("路徑", 420);
+            mList.Columns.Add("聲道", 58);
+            mList.Columns.Add("位元", 58);
+            mList.Columns.Add("大小", 80);
+            mList.Columns.Add("播放", 56);
+            mList.Columns.Add("最近播放", 90);
+            mList.Columns.Add("路徑", 360);
             mList.DoubleClick += delegate { PlaySelectedOrCurrent(); };
             mList.SelectedIndexChanged += delegate { UpdateSelectedInfo(); };
             mList.DrawColumnHeader += List_DrawColumnHeader;
             mList.DrawSubItem += List_DrawSubItem;
-            listLayout.Controls.Add(mList, 0, 1);
+            main.Controls.Add(mList, 0, 2);
 
             BuildContextMenu();
 
             FlowLayoutPanel listButtons = new FlowLayoutPanel();
             listButtons.Dock = DockStyle.Fill;
-            listButtons.Padding = new Padding(0, 10, 0, 0);
+            listButtons.Padding = new Padding(0, 12, 0, 0);
             listButtons.WrapContents = false;
+            listButtons.BackColor = Color.Transparent;
 
             mBtnRemove = MakeButton("移除選取", false);
             mBtnClear = MakeButton("清空清單", false);
             mBtnSaveList = MakeButton("儲存 M3U", false);
-
             ModernButton btnToolbox = MakeButton("音訊工具箱", false);
             ModernButton btnDashboard = MakeButton("統計頁", false);
 
-            mBtnRemove.Width = 95;
-            mBtnClear.Width = 95;
-            mBtnSaveList.Width = 95;
-            btnToolbox.Width = 115;
-            btnDashboard.Width = 85;
+            mBtnRemove.Width = 100;
+            mBtnClear.Width = 100;
+            mBtnSaveList.Width = 100;
+            btnToolbox.Width = 120;
+            btnDashboard.Width = 90;
 
             mBtnRemove.Click += delegate { RemoveSelected(); };
             mBtnClear.Click += delegate { ClearPlaylist(); };
@@ -356,52 +482,186 @@ namespace _1113354_陳冠瑋
             listButtons.Controls.Add(mBtnSaveList);
             listButtons.Controls.Add(btnToolbox);
             listButtons.Controls.Add(btnDashboard);
-            listLayout.Controls.Add(listButtons, 0, 2);
+            main.Controls.Add(listButtons, 0, 3);
+
+            CardPanel rightCard = new CardPanel();
+            rightCard.Dock = DockStyle.Fill;
+            rightCard.Margin = new Padding(0, 0, 0, 10);
+            rightCard.Radius = 22;
+            root.Controls.Add(rightCard, 2, 0);
+
+            TableLayoutPanel right = new TableLayoutPanel();
+            right.Dock = DockStyle.Fill;
+            right.Padding = new Padding(16);
+            right.RowCount = 8;
+            right.ColumnCount = 1;
+            right.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            right.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));
+            right.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            right.RowStyles.Add(new RowStyle(SizeType.Absolute, 120));
+            right.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            right.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            right.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            rightCard.Controls.Add(right);
+
+            Label rightTitle = MakeLabel("正在播放", 16, FontStyle.Bold, AppColor.Text);
+            rightTitle.Dock = DockStyle.Fill;
+            rightTitle.TextAlign = ContentAlignment.MiddleLeft;
+            right.Controls.Add(rightTitle, 0, 0);
+
+            Panel cover = new Panel();
+            cover.Dock = DockStyle.Fill;
+            cover.Margin = new Padding(0, 0, 0, 12);
+            cover.BackColor = AppColor.Card2;
+            Label coverIcon = MakeLabel("♪", 36, FontStyle.Bold, AppColor.Accent2);
+            coverIcon.Dock = DockStyle.Fill;
+            coverIcon.TextAlign = ContentAlignment.MiddleCenter;
+            cover.Controls.Add(coverIcon);
+            right.Controls.Add(cover, 0, 1);
+
+            mLblNow = MakeLabel("尚未播放", 11, FontStyle.Bold, AppColor.Text);
+            mLblNow.Dock = DockStyle.Fill;
+            mLblNow.TextAlign = ContentAlignment.MiddleLeft;
+            right.Controls.Add(mLblNow, 0, 2);
+
+            mLblSelectedInfo = MakeLabel("檔案資訊：尚未選取檔案", 9, FontStyle.Regular, AppColor.SubText);
+            mLblSelectedInfo.Dock = DockStyle.Fill;
+            mLblSelectedInfo.TextAlign = ContentAlignment.TopLeft;
+            right.Controls.Add(mLblSelectedInfo, 0, 3);
+
+            Label pathTitle = MakeLabel("檔案位置", 10, FontStyle.Bold, AppColor.SubText);
+            pathTitle.Dock = DockStyle.Fill;
+            pathTitle.TextAlign = ContentAlignment.BottomLeft;
+            right.Controls.Add(pathTitle, 0, 4);
+
+            mTxtPath = new TextBox();
+            mTxtPath.ReadOnly = true;
+            mTxtPath.Multiline = true;
+            mTxtPath.ScrollBars = ScrollBars.Vertical;
+            mTxtPath.BorderStyle = BorderStyle.FixedSingle;
+            mTxtPath.BackColor = AppColor.Input;
+            mTxtPath.ForeColor = AppColor.SubText;
+            mTxtPath.Dock = DockStyle.Fill;
+            right.Controls.Add(mTxtPath, 0, 5);
+
+            ModernButton btnOpenFolder = MakeButton("在資料夾顯示", false);
+            btnOpenFolder.Dock = DockStyle.Fill;
+            btnOpenFolder.Click += delegate { OpenSelectedInExplorer(); };
+            right.Controls.Add(btnOpenFolder, 0, 6);
+
+            ModernButton btnCopyPath = MakeButton("複製路徑", false);
+            btnCopyPath.Dock = DockStyle.Fill;
+            btnCopyPath.Click += delegate { CopySelectedPath(); };
+            right.Controls.Add(btnCopyPath, 0, 7);
 
             CardPanel playerCard = new CardPanel();
             playerCard.Dock = DockStyle.Fill;
-            playerCard.Margin = new Padding(0, 0, 0, 8);
-            root.Controls.Add(playerCard, 0, 2);
-            root.SetColumnSpan(playerCard, 2);
+            playerCard.Margin = new Padding(0, 0, 0, 6);
+            playerCard.Radius = 22;
+            root.Controls.Add(playerCard, 0, 1);
+            root.SetColumnSpan(playerCard, 3);
 
             TableLayoutPanel player = new TableLayoutPanel();
             player.Dock = DockStyle.Fill;
-            player.Padding = new Padding(18);
-            player.ColumnCount = 3;
-            player.RowCount = 5;
-            player.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            player.Padding = new Padding(18, 12, 18, 10);
+            player.ColumnCount = 4;
+            player.RowCount = 3;
             player.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250));
-            player.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
+            player.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            player.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
+            player.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 260));
             player.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-            player.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
-            player.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
-            player.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+            player.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
             player.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             playerCard.Controls.Add(player);
 
-            mLblNow = MakeLabel("尚未播放", 13, FontStyle.Bold, AppColor.Text);
-            mLblNow.Dock = DockStyle.Fill;
-            player.Controls.Add(mLblNow, 0, 0);
-            player.SetColumnSpan(mLblNow, 3);
+            Label miniNowTitle = MakeLabel("Now Playing", 9, FontStyle.Bold, AppColor.SubText);
+            miniNowTitle.Dock = DockStyle.Fill;
+            miniNowTitle.TextAlign = ContentAlignment.MiddleLeft;
+            player.Controls.Add(miniNowTitle, 0, 0);
+
+            mLblTime = MakeLabel("00:00 / 00:00", 10, FontStyle.Bold, AppColor.Text);
+            mLblTime.Dock = DockStyle.Fill;
+            mLblTime.TextAlign = ContentAlignment.MiddleCenter;
+            player.Controls.Add(mLblTime, 1, 0);
+
+            mLblAB = MakeLabel("AB：未設定", 9, FontStyle.Regular, AppColor.SubText);
+            mLblAB.Dock = DockStyle.Fill;
+            mLblAB.TextAlign = ContentAlignment.MiddleLeft;
+            player.Controls.Add(mLblAB, 3, 0);
+
+            FlowLayoutPanel controlBar = new FlowLayoutPanel();
+            controlBar.Dock = DockStyle.Fill;
+            controlBar.WrapContents = false;
+            controlBar.Padding = new Padding(0, 2, 0, 0);
+            controlBar.BackColor = Color.Transparent;
+
+            mBtnPrev = MakeButton("⏮", false);
+            mBtnPlay = MakeButton("▶", true);
+            mBtnPause = MakeButton("⏸", false);
+            mBtnStop = MakeButton("⏹", false);
+            mBtnNext = MakeButton("⏭", false);
+            mBtnMute = MakeButton("🔊", false);
+
+            mBtnPrev.Width = 50;
+            mBtnPlay.Width = 66;
+            mBtnPause.Width = 50;
+            mBtnStop.Width = 50;
+            mBtnNext.Width = 50;
+            mBtnMute.Width = 50;
+
+            mBtnPrev.Click += delegate { PlayPrevious(); };
+            mBtnPlay.Click += delegate { PlaySelectedOrCurrent(); };
+            mBtnPause.Click += delegate { TogglePause(); };
+            mBtnStop.Click += delegate { StopPlayback(); };
+            mBtnNext.Click += delegate { PlayNext(); };
+            mBtnMute.Click += delegate { ToggleMute(); };
+
+            controlBar.Controls.Add(mBtnPrev);
+            controlBar.Controls.Add(mBtnPlay);
+            controlBar.Controls.Add(mBtnPause);
+            controlBar.Controls.Add(mBtnStop);
+            controlBar.Controls.Add(mBtnNext);
+            controlBar.Controls.Add(mBtnMute);
+            player.Controls.Add(controlBar, 0, 1);
+            player.SetRowSpan(controlBar, 2);
 
             mWaveform = new WaveformView();
             mWaveform.Dock = DockStyle.Fill;
-            mWaveform.Margin = new Padding(0, 4, 16, 0);
+            mWaveform.Margin = new Padding(0, 0, 14, 0);
             mWaveform.SeekRequested += delegate (object sender, SeekEventArgs e)
             {
                 SeekTo(e.PositionMs);
             };
-            player.Controls.Add(mWaveform, 0, 1);
+            player.Controls.Add(mWaveform, 1, 1);
 
             mVisualizer = new VisualizerView();
             mVisualizer.Dock = DockStyle.Fill;
-            mVisualizer.Margin = new Padding(0, 4, 16, 0);
-            player.Controls.Add(mVisualizer, 1, 1);
+            mVisualizer.Margin = new Padding(0, 0, 14, 0);
+            player.Controls.Add(mVisualizer, 2, 1);
 
-            mLblSelectedInfo = MakeLabel("檔案資訊：尚未選取檔案", 9, FontStyle.Regular, AppColor.SubText);
-            mLblSelectedInfo.Dock = DockStyle.Fill;
-            mLblSelectedInfo.TextAlign = ContentAlignment.MiddleLeft;
-            player.Controls.Add(mLblSelectedInfo, 2, 1);
+            FlowLayoutPanel abBar = new FlowLayoutPanel();
+            abBar.Dock = DockStyle.Fill;
+            abBar.WrapContents = false;
+            abBar.Padding = new Padding(0, 2, 0, 0);
+            abBar.BackColor = Color.Transparent;
+
+            mBtnSetA = MakeButton("設 A", false);
+            mBtnSetB = MakeButton("設 B", false);
+            mBtnClearAB = MakeButton("清 AB", false);
+            mBtnSetA.Width = 66;
+            mBtnSetB.Width = 66;
+            mBtnClearAB.Width = 78;
+
+            mBtnSetA.Click += delegate { SetLoopA(); };
+            mBtnSetB.Click += delegate { SetLoopB(); };
+            mBtnClearAB.Click += delegate { ClearABLoop(); };
+
+            abBar.Controls.Add(mBtnSetA);
+            abBar.Controls.Add(mBtnSetB);
+            abBar.Controls.Add(mBtnClearAB);
+            player.Controls.Add(abBar, 3, 1);
 
             mTrkProgress = new TrackBar();
             mTrkProgress.Dock = DockStyle.Fill;
@@ -424,90 +684,24 @@ namespace _1113354_陳冠瑋
                     UpdateTimeDisplay(preview, _durationMs);
                 }
             };
-            player.Controls.Add(mTrkProgress, 0, 2);
+            player.Controls.Add(mTrkProgress, 1, 2);
             player.SetColumnSpan(mTrkProgress, 2);
-
-            mLblTime = MakeLabel("00:00 / 00:00", 10, FontStyle.Bold, AppColor.Text);
-            mLblTime.Dock = DockStyle.Fill;
-            mLblTime.TextAlign = ContentAlignment.MiddleRight;
-            player.Controls.Add(mLblTime, 2, 2);
-
-            FlowLayoutPanel controlBar = new FlowLayoutPanel();
-            controlBar.Dock = DockStyle.Fill;
-            controlBar.WrapContents = false;
-            controlBar.Padding = new Padding(0, 2, 0, 0);
-
-            mBtnPrev = MakeButton("⏮", false);
-            mBtnPlay = MakeButton("▶ 播放", true);
-            mBtnPause = MakeButton("⏸", false);
-            mBtnStop = MakeButton("⏹", false);
-            mBtnNext = MakeButton("⏭", false);
-            mBtnMute = MakeButton("🔊", false);
-
-            mBtnPrev.Width = 58;
-            mBtnPlay.Width = 105;
-            mBtnPause.Width = 58;
-            mBtnStop.Width = 58;
-            mBtnNext.Width = 58;
-            mBtnMute.Width = 58;
-
-            mBtnPrev.Click += delegate { PlayPrevious(); };
-            mBtnPlay.Click += delegate { PlaySelectedOrCurrent(); };
-            mBtnPause.Click += delegate { TogglePause(); };
-            mBtnStop.Click += delegate { StopPlayback(); };
-            mBtnNext.Click += delegate { PlayNext(); };
-            mBtnMute.Click += delegate { ToggleMute(); };
-
-            controlBar.Controls.Add(mBtnPrev);
-            controlBar.Controls.Add(mBtnPlay);
-            controlBar.Controls.Add(mBtnPause);
-            controlBar.Controls.Add(mBtnStop);
-            controlBar.Controls.Add(mBtnNext);
-            controlBar.Controls.Add(mBtnMute);
-
-            player.Controls.Add(controlBar, 0, 3);
-
-            FlowLayoutPanel abBar = new FlowLayoutPanel();
-            abBar.Dock = DockStyle.Fill;
-            abBar.WrapContents = false;
-            abBar.Padding = new Padding(0, 2, 0, 0);
-
-            mBtnSetA = MakeButton("設 A 點", false);
-            mBtnSetB = MakeButton("設 B 點", false);
-            mBtnClearAB = MakeButton("清除 AB", false);
-            mBtnSetA.Width = 82;
-            mBtnSetB.Width = 82;
-            mBtnClearAB.Width = 90;
-
-            mBtnSetA.Click += delegate { SetLoopA(); };
-            mBtnSetB.Click += delegate { SetLoopB(); };
-            mBtnClearAB.Click += delegate { ClearABLoop(); };
-
-            mLblAB = MakeLabel("AB：未設定", 9, FontStyle.Regular, AppColor.SubText);
-            mLblAB.Width = 250;
-            mLblAB.TextAlign = ContentAlignment.MiddleLeft;
-
-            abBar.Controls.Add(mBtnSetA);
-            abBar.Controls.Add(mBtnSetB);
-            abBar.Controls.Add(mBtnClearAB);
-            abBar.Controls.Add(mLblAB);
-            player.Controls.Add(abBar, 1, 3);
-            player.SetColumnSpan(abBar, 2);
 
             FlowLayoutPanel sliders = new FlowLayoutPanel();
             sliders.Dock = DockStyle.Fill;
             sliders.WrapContents = false;
-            sliders.Padding = new Padding(0, 4, 0, 0);
+            sliders.Padding = new Padding(0, 2, 0, 0);
+            sliders.BackColor = Color.Transparent;
 
-            mLblVolume = MakeLabel("音量 80%", 9, FontStyle.Regular, AppColor.SubText);
-            mLblVolume.Width = 78;
+            mLblVolume = MakeLabel("音量 80%", 8, FontStyle.Regular, AppColor.SubText);
+            mLblVolume.Width = 70;
             mLblVolume.TextAlign = ContentAlignment.MiddleLeft;
 
             mTrkVolume = new TrackBar();
             mTrkVolume.Minimum = 0;
             mTrkVolume.Maximum = 1000;
             mTrkVolume.Value = 800;
-            mTrkVolume.Width = 170;
+            mTrkVolume.Width = 118;
             mTrkVolume.TickFrequency = 100;
             mTrkVolume.BackColor = AppColor.Card;
             mTrkVolume.ValueChanged += delegate
@@ -517,16 +711,15 @@ namespace _1113354_陳冠瑋
                     ApplyVolume();
             };
 
-            mLblSpeed = MakeLabel("倍速 100%", 9, FontStyle.Regular, AppColor.SubText);
-            mLblSpeed.Width = 88;
+            mLblSpeed = MakeLabel("倍速 100%", 8, FontStyle.Regular, AppColor.SubText);
+            mLblSpeed.Width = 76;
             mLblSpeed.TextAlign = ContentAlignment.MiddleLeft;
-            mLblSpeed.Margin = new Padding(20, 0, 0, 0);
 
             mTrkSpeed = new TrackBar();
             mTrkSpeed.Minimum = 50;
             mTrkSpeed.Maximum = 200;
             mTrkSpeed.Value = 100;
-            mTrkSpeed.Width = 190;
+            mTrkSpeed.Width = 118;
             mTrkSpeed.TickFrequency = 25;
             mTrkSpeed.BackColor = AppColor.Card;
             mTrkSpeed.ValueChanged += delegate
@@ -535,28 +728,17 @@ namespace _1113354_陳冠瑋
                 ApplySpeed();
             };
 
-            mTxtPath = new TextBox();
-            mTxtPath.ReadOnly = true;
-            mTxtPath.BorderStyle = BorderStyle.FixedSingle;
-            mTxtPath.BackColor = AppColor.Input;
-            mTxtPath.ForeColor = AppColor.SubText;
-            mTxtPath.Width = 455;
-            mTxtPath.Margin = new Padding(20, 5, 0, 0);
-
             sliders.Controls.Add(mLblVolume);
             sliders.Controls.Add(mTrkVolume);
             sliders.Controls.Add(mLblSpeed);
             sliders.Controls.Add(mTrkSpeed);
-            sliders.Controls.Add(mTxtPath);
-
-            player.Controls.Add(sliders, 0, 4);
-            player.SetColumnSpan(sliders, 3);
+            player.Controls.Add(sliders, 3, 2);
 
             mLblStatus = MakeLabel("就緒。可拖曳 WAV / MP3 / MP4 檔或資料夾進來。", 9, FontStyle.Regular, AppColor.SubText);
             mLblStatus.Dock = DockStyle.Fill;
             mLblStatus.TextAlign = ContentAlignment.MiddleLeft;
-            root.Controls.Add(mLblStatus, 0, 3);
-            root.SetColumnSpan(mLblStatus, 2);
+            root.Controls.Add(mLblStatus, 0, 2);
+            root.SetColumnSpan(mLblStatus, 3);
 
             ToolTip toolTip = new ToolTip();
             toolTip.SetToolTip(mBtnPrev, "上一首");
@@ -571,8 +753,12 @@ namespace _1113354_陳冠瑋
             mTimer.Tick += UiTimer_Tick;
             mTimer.Start();
 
+            UpdateNavigationButtons();
+            UpdateListTitle();
             ResumeLayout();
         }
+
+
 
         private ModernButton MakeButton(string text, bool primary)
         {
@@ -584,6 +770,49 @@ namespace _1113354_陳冠瑋
             btn.Primary = primary;
             btn.Font = new Font("Microsoft JhengHei UI", 9F, FontStyle.Bold);
             return btn;
+        }
+
+        private ModernButton MakeNavButton(string text)
+        {
+            ModernButton btn = MakeButton(text, false);
+            btn.Dock = DockStyle.Fill;
+            btn.Width = 220;
+            btn.Height = 34;
+            btn.Margin = new Padding(0, 3, 0, 3);
+            btn.Font = new Font("Microsoft JhengHei UI", 10F, FontStyle.Bold);
+            return btn;
+        }
+
+        private Control MakeQuickCard(string title, string subtitle, Color color1, Color color2, EventHandler click)
+        {
+            QuickCardPanel card = new QuickCardPanel();
+            card.Title = title;
+            card.Subtitle = subtitle;
+            card.IconText = GetQuickCardIcon(title);
+            card.Color1 = color1;
+            card.Color2 = color2;
+            card.Radius = 20;
+            card.Margin = new Padding(0, 0, 14, 0);
+            card.Cursor = Cursors.Hand;
+            card.Click += click;
+            return card;
+        }
+
+        private static string GetQuickCardIcon(string title)
+        {
+            if (title.IndexOf("最愛", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "♥";
+
+            if (title.IndexOf("近期", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "↺";
+
+            if (title.IndexOf("排行", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "#";
+
+            if (title.IndexOf("加入", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "+";
+
+            return "♪";
         }
 
         private Label MakeLabel(string text, float size, FontStyle style, Color color)
@@ -761,26 +990,14 @@ namespace _1113354_陳冠瑋
             mList.BeginUpdate();
             mList.Items.Clear();
 
-            string keyword = mTxtSearch == null ? "" : mTxtSearch.Text.Trim();
-
-            foreach (TrackItem track in _tracks)
+            foreach (TrackItem track in GetTracksForCurrentView())
             {
-                if (mChkOnlyFavorite != null && mChkOnlyFavorite.Checked && !track.IsFavorite)
-                    continue;
-
-                if (keyword.Length > 0)
-                {
-                    string hay = track.FileName + " " + track.Path + " " + track.FormatName;
-                    if (hay.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) < 0)
-                        continue;
-                }
-
                 string flag = "";
 
                 if (_currentTrack != null && string.Equals(_currentTrack.Path, track.Path, StringComparison.OrdinalIgnoreCase))
                     flag = "▶";
                 else if (track.IsFavorite)
-                    flag = "★";
+                    flag = "♥";
 
                 ListViewItem item = new ListViewItem(flag);
                 item.Tag = track;
@@ -791,6 +1008,8 @@ namespace _1113354_陳冠瑋
                 item.SubItems.Add(track.ChannelsText);
                 item.SubItems.Add(track.BitsText);
                 item.SubItems.Add(FormatBytes(track.FileSize));
+                item.SubItems.Add(GetPlayCount(track.Path).ToString());
+                item.SubItems.Add(GetLastPlayedText(track.Path));
                 item.SubItems.Add(track.Path);
 
                 mList.Items.Add(item);
@@ -800,6 +1019,176 @@ namespace _1113354_陳冠瑋
             }
 
             mList.EndUpdate();
+            UpdateListTitle();
+            UpdateNavigationButtons();
+        }
+
+
+
+        private IEnumerable<TrackItem> GetTracksForCurrentView()
+        {
+            IEnumerable<TrackItem> query = _tracks;
+
+            if (_currentLibraryView == LibraryView.Favorites)
+            {
+                query = query.Where(t => t.IsFavorite);
+            }
+            else if (_currentLibraryView == LibraryView.Recent)
+            {
+                query = _recentPaths
+                    .Select(path => _tracks.FirstOrDefault(t => string.Equals(t.Path, path, StringComparison.OrdinalIgnoreCase)))
+                    .Where(t => t != null);
+            }
+            else if (_currentLibraryView == LibraryView.Ranking)
+            {
+                query = query
+                    .OrderByDescending(t => GetPlayCount(t.Path))
+                    .ThenByDescending(t => GetLastPlayedTicks(t.Path))
+                    .ThenBy(t => t.FileName);
+            }
+
+            if (mChkOnlyFavorite != null && mChkOnlyFavorite.Checked)
+                query = query.Where(t => t.IsFavorite);
+
+            string keyword = mTxtSearch == null ? "" : mTxtSearch.Text.Trim();
+
+            if (keyword.Length > 0)
+            {
+                query = query.Where(t =>
+                    (t.FileName ?? "").IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    (t.Path ?? "").IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    (t.FormatName ?? "").IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0
+                );
+            }
+
+            return query;
+        }
+
+        private void SwitchLibraryView(LibraryView view)
+        {
+            _currentLibraryView = view;
+            RefreshList();
+            UpdateListTitle();
+            UpdateNavigationButtons();
+
+            if (view == LibraryView.Playlist)
+                SetStatus("已切換到播放清單。");
+            else if (view == LibraryView.Favorites)
+                SetStatus("已切換到我的最愛。");
+            else if (view == LibraryView.Recent)
+                SetStatus("已切換到近期播放。");
+            else if (view == LibraryView.Ranking)
+                SetStatus("已切換到排行版。");
+        }
+
+        private void UpdateListTitle()
+        {
+            if (mLblListTitle == null)
+                return;
+
+            string title = "播放清單";
+
+            if (_currentLibraryView == LibraryView.Favorites)
+                title = "我的最愛";
+            else if (_currentLibraryView == LibraryView.Recent)
+                title = "近期播放";
+            else if (_currentLibraryView == LibraryView.Ranking)
+                title = "排行版";
+
+            int count = GetTracksForCurrentView().Count();
+            mLblListTitle.Text = title + "　" + count + " 首";
+
+            if (mLblTitle != null)
+            {
+                if (_currentLibraryView == LibraryView.Playlist)
+                    mLblTitle.Text = "想聽什麼？";
+                else
+                    mLblTitle.Text = title;
+            }
+        }
+
+        private void UpdateNavigationButtons()
+        {
+            if (mBtnViewPlaylist != null)
+                mBtnViewPlaylist.Primary = _currentLibraryView == LibraryView.Playlist;
+            if (mBtnViewFavorites != null)
+                mBtnViewFavorites.Primary = _currentLibraryView == LibraryView.Favorites;
+            if (mBtnViewRecent != null)
+                mBtnViewRecent.Primary = _currentLibraryView == LibraryView.Recent;
+            if (mBtnViewRanking != null)
+                mBtnViewRanking.Primary = _currentLibraryView == LibraryView.Ranking;
+
+            if (mBtnViewPlaylist != null)
+                mBtnViewPlaylist.Invalidate();
+            if (mBtnViewFavorites != null)
+                mBtnViewFavorites.Invalidate();
+            if (mBtnViewRecent != null)
+                mBtnViewRecent.Invalidate();
+            if (mBtnViewRanking != null)
+                mBtnViewRanking.Invalidate();
+        }
+
+        private void RegisterPlayback(TrackItem track)
+        {
+            if (track == null || string.IsNullOrWhiteSpace(track.Path))
+                return;
+
+            string path = track.Path;
+
+            if (!_playCounts.ContainsKey(path))
+                _playCounts[path] = 0;
+
+            _playCounts[path]++;
+            _lastPlayedTicks[path] = DateTime.Now.Ticks;
+
+            _recentPaths.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+            _recentPaths.Insert(0, path);
+
+            while (_recentPaths.Count > 60)
+                _recentPaths.RemoveAt(_recentPaths.Count - 1);
+        }
+
+        private int GetPlayCount(string path)
+        {
+            int value;
+            if (!string.IsNullOrWhiteSpace(path) && _playCounts.TryGetValue(path, out value))
+                return value;
+
+            return 0;
+        }
+
+        private long GetLastPlayedTicks(string path)
+        {
+            long value;
+            if (!string.IsNullOrWhiteSpace(path) && _lastPlayedTicks.TryGetValue(path, out value))
+                return value;
+
+            return 0;
+        }
+
+        private string GetLastPlayedText(string path)
+        {
+            long ticks = GetLastPlayedTicks(path);
+
+            if (ticks <= 0)
+                return "-";
+
+            try
+            {
+                DateTime time = new DateTime(ticks);
+
+                if (time.Date == DateTime.Today)
+                    return "今天 " + time.ToString("HH:mm");
+
+                if (time.Date == DateTime.Today.AddDays(-1))
+                    return "昨天 " + time.ToString("HH:mm");
+
+                return time.ToString("MM/dd HH:mm");
+            }
+            catch
+            {
+                return "-";
+            }
         }
 
         private void SelectTrack(TrackItem track)
@@ -889,6 +1278,7 @@ namespace _1113354_陳冠瑋
                     RunMci("play " + MciAlias, true);
 
                 _currentTrack = track;
+                RegisterPlayback(track);
                 _playRequested = true;
                 _lastPositionMs = 0;
                 _loopA = -1;
@@ -896,7 +1286,7 @@ namespace _1113354_陳冠瑋
 
                 mTxtPath.Text = track.Path;
                 mLblNow.Text = "正在播放：" + track.FileName;
-                mBtnPlay.Text = "▶ 播放";
+                mBtnPlay.Text = "▶";
                 mBtnPause.Text = "⏸";
                 mLblAB.Text = "AB：未設定";
 
@@ -1564,7 +1954,8 @@ namespace _1113354_陳冠瑋
                     favoriteCount++;
             }
 
-            mLblStats.Text = _tracks.Count + " 首｜" + FormatTime(totalMs) + "｜收藏 " + favoriteCount;
+            int totalPlays = _playCounts.Values.Sum();
+            mLblStats.Text = _tracks.Count + " 首｜" + FormatTime(totalMs) + "｜收藏 " + favoriteCount + "｜播放 " + totalPlays;
         }
 
         private void UiTimer_Tick(object sender, EventArgs e)
@@ -2088,6 +2479,7 @@ namespace _1113354_陳冠瑋
         private void UpdateTimeDisplay(long posMs, long totalMs)
         {
             if (mLblTime != null)
+                mLblTime.Text = FormatTime(posMs) + " / " + FormatTime(totalMs);
             {
                 string newText = FormatTime(posMs) + " / " + FormatTime(totalMs);
                 if (mLblTime.Text != newText)
@@ -2141,6 +2533,7 @@ namespace _1113354_陳冠瑋
                 lines.Add("SPEED|" + mTrkSpeed.Value);
                 lines.Add("SHUFFLE|" + (mChkShuffle.Checked ? "1" : "0"));
                 lines.Add("LOOP|" + mCboLoop.SelectedIndex);
+                lines.Add("VIEW|" + ((int)_currentLibraryView));
 
                 if (_watcher != null)
                     lines.Add("WATCH|" + _watcher.Path);
@@ -2151,6 +2544,15 @@ namespace _1113354_陳冠瑋
                         lines.Add("FAV|" + track.Path);
                 }
 
+                foreach (KeyValuePair<string, int> item in _playCounts)
+                    lines.Add("PLAYCOUNT|" + item.Value + "|" + item.Key);
+
+                foreach (KeyValuePair<string, long> item in _lastPlayedTicks)
+                    lines.Add("LASTPLAYED|" + item.Value + "|" + item.Key);
+
+                foreach (string path in _recentPaths)
+                    lines.Add("RECENT|" + path);
+
                 foreach (TrackItem track in _tracks)
                     lines.Add("TRACK|" + track.Path);
 
@@ -2160,6 +2562,7 @@ namespace _1113354_陳冠瑋
             {
             }
         }
+
 
         private void LoadSession()
         {
@@ -2172,6 +2575,7 @@ namespace _1113354_陳冠瑋
 
                 List<string> loadTracks = new List<string>();
                 string watchFolder = "";
+                int restoredView = 0;
 
                 foreach (string line in File.ReadAllLines(file, Encoding.UTF8))
                 {
@@ -2200,9 +2604,45 @@ namespace _1113354_陳冠瑋
                                 mCboLoop.SelectedIndex = value;
                         }
                     }
+                    else if (line.StartsWith("VIEW|"))
+                    {
+                        int value;
+                        if (int.TryParse(line.Substring(5), out value))
+                            restoredView = value;
+                    }
                     else if (line.StartsWith("FAV|"))
                     {
                         _favoritePaths.Add(line.Substring(4));
+                    }
+                    else if (line.StartsWith("PLAYCOUNT|"))
+                    {
+                        int sep = line.IndexOf('|', 10);
+                        int count;
+
+                        if (sep > 10 && int.TryParse(line.Substring(10, sep - 10), out count))
+                        {
+                            string path = line.Substring(sep + 1);
+                            if (path.Length > 0)
+                                _playCounts[path] = count;
+                        }
+                    }
+                    else if (line.StartsWith("LASTPLAYED|"))
+                    {
+                        int sep = line.IndexOf('|', 11);
+                        long ticks;
+
+                        if (sep > 11 && long.TryParse(line.Substring(11, sep - 11), out ticks))
+                        {
+                            string path = line.Substring(sep + 1);
+                            if (path.Length > 0)
+                                _lastPlayedTicks[path] = ticks;
+                        }
+                    }
+                    else if (line.StartsWith("RECENT|"))
+                    {
+                        string path = line.Substring(7);
+                        if (path.Length > 0 && !_recentPaths.Any(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)))
+                            _recentPaths.Add(path);
                     }
                     else if (line.StartsWith("TRACK|"))
                     {
@@ -2219,8 +2659,13 @@ namespace _1113354_陳冠瑋
                 foreach (TrackItem track in _tracks)
                     track.IsFavorite = _favoritePaths.Contains(track.Path);
 
+                if (restoredView >= 0 && restoredView <= 3)
+                    _currentLibraryView = (LibraryView)restoredView;
+
                 RefreshList();
                 UpdateStats();
+                UpdateListTitle();
+                UpdateNavigationButtons();
 
                 if (Directory.Exists(watchFolder))
                     StartWatchingFolder(watchFolder);
@@ -2232,6 +2677,7 @@ namespace _1113354_陳冠瑋
             {
             }
         }
+
 
         private static string GetSessionPath()
         {
@@ -2310,7 +2756,7 @@ namespace _1113354_陳冠瑋
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
             DialogResult result = MessageBox.Show(
-                "確定要關閉 音訊播放器 嗎？",
+                "確定要關閉目前音樂庫嗎？",
                 "關閉確認",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Question
@@ -5118,6 +5564,81 @@ namespace _1113354_陳冠瑋
             }
         }
 
+        private class QuickCardPanel : Control
+        {
+            public string Title = "";
+            public string Subtitle = "";
+            public string IconText = "♪";
+            public Color Color1 = AppColor.Accent;
+            public Color Color2 = AppColor.Accent2;
+            public int Radius = 20;
+
+            public QuickCardPanel()
+            {
+                DoubleBuffered = true;
+                SetStyle(
+                    ControlStyles.SupportsTransparentBackColor |
+                    ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.UserPaint |
+                    ControlStyles.OptimizedDoubleBuffer |
+                    ControlStyles.ResizeRedraw,
+                    true
+                );
+                BackColor = Color.Transparent;
+                MinimumSize = new Size(120, 84);
+            }
+
+            protected override void OnPaintBackground(PaintEventArgs e)
+            {
+                using (SolidBrush b = new SolidBrush(Ui.ResolveBackColor(this, AppColor.Hero2)))
+                    e.Graphics.FillRectangle(b, ClientRectangle);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                Rectangle rect = ClientRectangle;
+                rect.Inflate(-1, -1);
+
+                using (GraphicsPath path = Ui.RoundRect(rect, Radius))
+                using (LinearGradientBrush brush = new LinearGradientBrush(rect, Color1, Color2, LinearGradientMode.Horizontal))
+                {
+                    e.Graphics.FillPath(brush, path);
+                }
+
+                Rectangle iconRect = new Rectangle(16, 0, 48, Height);
+                Rectangle titleRect = new Rectangle(76, 20, Math.Max(10, Width - 96), 28);
+                Rectangle subRect = new Rectangle(76, 50, Math.Max(10, Width - 96), 22);
+
+                using (Font iconFont = new Font("Microsoft JhengHei UI", 22F, FontStyle.Bold))
+                using (Font titleFont = new Font("Microsoft JhengHei UI", 13F, FontStyle.Bold))
+                using (Font subFont = new Font("Microsoft JhengHei UI", 8.5F, FontStyle.Regular))
+                using (SolidBrush white = new SolidBrush(Color.White))
+                using (SolidBrush sub = new SolidBrush(Color.FromArgb(235, 235, 235)))
+                {
+                    StringFormat iconFormat = new StringFormat();
+                    iconFormat.Alignment = StringAlignment.Center;
+                    iconFormat.LineAlignment = StringAlignment.Center;
+                    iconFormat.Trimming = StringTrimming.None;
+                    iconFormat.FormatFlags = StringFormatFlags.NoWrap;
+
+                    StringFormat titleFormat = new StringFormat();
+                    titleFormat.Alignment = StringAlignment.Near;
+                    titleFormat.LineAlignment = StringAlignment.Center;
+                    titleFormat.Trimming = StringTrimming.EllipsisCharacter;
+                    titleFormat.FormatFlags = StringFormatFlags.NoWrap;
+
+                    e.Graphics.DrawString(IconText, iconFont, white, iconRect, iconFormat);
+                    e.Graphics.DrawString(Title, titleFont, white, titleRect, titleFormat);
+                    e.Graphics.DrawString(Subtitle, subFont, sub, subRect, titleFormat);
+                }
+
+                base.OnPaint(e);
+            }
+        }
+
         private class CardPanel : Panel
         {
             public int Radius = 22;
@@ -5131,6 +5652,8 @@ namespace _1113354_陳冠瑋
 
             protected override void OnPaintBackground(PaintEventArgs e)
             {
+                using (SolidBrush b = new SolidBrush(Ui.ResolveBackColor(this, AppColor.Bg)))
+                    e.Graphics.FillRectangle(b, ClientRectangle);
             }
 
             protected override void OnPaint(PaintEventArgs e)
@@ -5166,6 +5689,8 @@ namespace _1113354_陳冠瑋
 
             protected override void OnPaintBackground(PaintEventArgs e)
             {
+                using (SolidBrush b = new SolidBrush(Ui.ResolveBackColor(this, AppColor.Bg)))
+                    e.Graphics.FillRectangle(b, ClientRectangle);
             }
 
             protected override void OnPaint(PaintEventArgs e)
@@ -5208,6 +5733,23 @@ namespace _1113354_陳冠瑋
                 return path;
             }
 
+            public static Color ResolveBackColor(Control control, Color fallback)
+            {
+                Control current = control == null ? null : control.Parent;
+
+                while (current != null)
+                {
+                    Color c = current.BackColor;
+
+                    if (c != Color.Transparent && c.A > 0)
+                        return c;
+
+                    current = current.Parent;
+                }
+
+                return fallback;
+            }
+
             public static Color Lighten(Color c, int amount)
             {
                 return Color.FromArgb(
@@ -5231,22 +5773,25 @@ namespace _1113354_陳冠瑋
 
         private static class AppColor
         {
-            public static readonly Color Bg = Color.FromArgb(15, 18, 28);
-            public static readonly Color Card = Color.FromArgb(25, 30, 45);
-            public static readonly Color Card2 = Color.FromArgb(31, 37, 55);
-            public static readonly Color Card3 = Color.FromArgb(38, 45, 65);
-            public static readonly Color Input = Color.FromArgb(20, 24, 36);
-            public static readonly Color Border = Color.FromArgb(55, 63, 85);
+            public static readonly Color Bg = Color.FromArgb(0, 0, 0);
+            public static readonly Color Card = Color.FromArgb(18, 18, 18);
+            public static readonly Color Card2 = Color.FromArgb(24, 24, 24);
+            public static readonly Color Card3 = Color.FromArgb(34, 34, 34);
+            public static readonly Color Input = Color.FromArgb(36, 36, 36);
+            public static readonly Color Border = Color.FromArgb(28, 28, 28);
 
-            public static readonly Color Text = Color.FromArgb(235, 238, 248);
-            public static readonly Color SubText = Color.FromArgb(160, 170, 195);
+            public static readonly Color Text = Color.FromArgb(245, 245, 245);
+            public static readonly Color SubText = Color.FromArgb(179, 179, 179);
 
-            public static readonly Color Accent = Color.FromArgb(91, 118, 255);
-            public static readonly Color Accent2 = Color.FromArgb(84, 210, 255);
-            public static readonly Color Button = Color.FromArgb(52, 61, 86);
-            public static readonly Color Button2 = Color.FromArgb(42, 49, 70);
-            public static readonly Color Selected = Color.FromArgb(68, 86, 145);
+            public static readonly Color Accent = Color.FromArgb(30, 215, 96);
+            public static readonly Color Accent2 = Color.FromArgb(110, 231, 183);
+            public static readonly Color Hero1 = Color.FromArgb(76, 59, 16);
+            public static readonly Color Hero2 = Color.FromArgb(18, 18, 18);
+            public static readonly Color Button = Color.FromArgb(40, 40, 40);
+            public static readonly Color Button2 = Color.FromArgb(32, 32, 32);
+            public static readonly Color Selected = Color.FromArgb(56, 56, 56);
             public static readonly Color Warning = Color.FromArgb(255, 205, 85);
         }
+
     }
 }
