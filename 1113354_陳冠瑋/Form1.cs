@@ -5,10 +5,14 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+
 
 namespace _1113354_陳冠瑋
 {
@@ -20,18 +24,43 @@ namespace _1113354_陳冠瑋
         [DllImport("winmm.dll", CharSet = CharSet.Auto)]
         private static extern bool mciGetErrorString(int errorCode, StringBuilder errorText, int errorTextSize);
 
+        [DllImport("user32.dll")]
+        private static extern bool ReleaseCapture();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, int wParam, int lParam);
+
+        private const int WM_NCLBUTTONDOWN = 0xA1;
+        private const int HTCAPTION = 0x2;
+
         private const string MciAlias = "wav_player";
         private static readonly string[] SupportedAudioExtensions = new string[] { ".wav", ".mp3", ".mp4" };
         private const string SupportedAudioFilter = "支援音訊/影片檔 (*.wav;*.mp3;*.mp4)|*.wav;*.mp3;*.mp4|WAV 檔案 (*.wav)|*.wav|MP3 檔案 (*.mp3)|*.mp3|MP4 影片/音訊 (*.mp4)|*.mp4|所有檔案 (*.*)|*.*";
+        // YouTube 搜尋會先嘗試讀取公開影片 RSS 搜尋結果，不需 API Key。
+        // 如果 RSS 搜尋失敗，也可填入 YouTube Data API v3 key 作為備援。
+        private const string YouTubeApiKey = "";
+        // Spotify 官方 Web API 需要 Client ID / Client Secret 才能直接回傳歌曲結果。
+        // 不填時仍會顯示 Spotify 搜尋入口；填入後會直接顯示 Spotify Track 結果。
+        private const string SpotifyClientId = "";
+        private const string SpotifyClientSecret = "";
+        private const string AudiusAppName = "MusicLibraryWinForms";
+        private const int OnlineSearchLimit = 12;
 
-        private readonly List<TrackItem> _tracks = new List<TrackItem>();
+
+        internal readonly List<TrackItem> _tracks = new List<TrackItem>();
         private readonly HashSet<string> _favoritePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly List<string> _recentPaths = new List<string>();
         private readonly Dictionary<string, int> _playCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, long> _lastPlayedTicks = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        private readonly List<OnlineSearchItem> _onlineResults = new List<OnlineSearchItem>();
         private readonly Random _random = new Random();
 
-        private TrackItem _currentTrack;
+        private bool _networkAvailable = false;
+        private bool _onlineSearchRunning = false;
+        private int _onlineSearchStamp = 0;
+        private DateTime _lastNetworkCheck = DateTime.MinValue;
+
+        internal TrackItem _currentTrack;
         private FileSystemWatcher _watcher;
 
         private bool _mciOpen = false;
@@ -51,7 +80,7 @@ namespace _1113354_陳冠瑋
         private int _waveformLoadStamp = 0;
 
         private TextBox mTxtSearch;
-        private TextBox mTxtPath;
+        private PathDisplayPanel mTxtPath;
 
         private ListView mList;
 
@@ -89,7 +118,9 @@ namespace _1113354_陳冠瑋
         private ModernButton mBtnViewFavorites;
         private ModernButton mBtnViewRecent;
         private ModernButton mBtnViewRanking;
+        private ModernButton mBtnViewOnline;
         private Label mLblListTitle;
+        private Label mLblNetworkMode;
 
         private ModernButton mBtnSetA;
         private ModernButton mBtnSetB;
@@ -105,17 +136,20 @@ namespace _1113354_陳冠瑋
 
         private WaveformView mWaveform;
         private VisualizerView mVisualizer;
+        private RotatingDiscView mDisc;
 
         private Timer mTimer;
+        private Timer mOnlineSearchTimer;
 
         private ContextMenuStrip mMenu;
 
-        private enum LibraryView
+        internal enum LibraryView
         {
             Playlist,
             Favorites,
             Recent,
-            Ranking
+            Ranking,
+            OnlineSearch
         }
 
         private LibraryView _currentLibraryView = LibraryView.Playlist;
@@ -142,6 +176,8 @@ namespace _1113354_陳冠瑋
             Size = new Size(1380, 820);
             MinimumSize = new Size(1180, 700);
             StartPosition = FormStartPosition.CenterScreen;
+            FormBorderStyle = FormBorderStyle.None;
+            Icon = CreateAppIcon();
             Font = new Font("Microsoft JhengHei UI", 10F);
             BackColor = AppColor.Bg;
             ForeColor = AppColor.Text;
@@ -154,7 +190,7 @@ namespace _1113354_陳冠瑋
 
             TableLayoutPanel root = new TableLayoutPanel();
             root.Dock = DockStyle.Fill;
-            root.Padding = new Padding(12);
+            root.Padding = new Padding(12, 58, 12, 12);
             root.BackColor = AppColor.Bg;
             root.ColumnCount = 3;
             root.RowCount = 3;
@@ -165,6 +201,7 @@ namespace _1113354_陳冠瑋
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 142));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
             Controls.Add(root);
+            BuildCustomTitleBar();
 
             CardPanel sideCard = new CardPanel();
             sideCard.Dock = DockStyle.Fill;
@@ -182,8 +219,8 @@ namespace _1113354_陳冠瑋
             side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
-            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
             side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             side.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
@@ -207,15 +244,18 @@ namespace _1113354_陳冠瑋
             mBtnViewPlaylist = MakeNavButton("播放清單");
             mBtnViewFavorites = MakeNavButton("我的最愛");
             mBtnViewRecent = MakeNavButton("近期播放");
-            mBtnViewRanking = MakeNavButton("排行版");
+            mBtnViewRanking = MakeNavButton("排行榜");
+            mBtnViewOnline = MakeNavButton("線上搜尋");
             mBtnViewPlaylist.Click += delegate { SwitchLibraryView(LibraryView.Playlist); };
             mBtnViewFavorites.Click += delegate { SwitchLibraryView(LibraryView.Favorites); };
             mBtnViewRecent.Click += delegate { SwitchLibraryView(LibraryView.Recent); };
             mBtnViewRanking.Click += delegate { SwitchLibraryView(LibraryView.Ranking); };
+            mBtnViewOnline.Click += delegate { SwitchLibraryView(LibraryView.OnlineSearch); };
             side.Controls.Add(mBtnViewPlaylist, 0, 1);
             side.Controls.Add(mBtnViewFavorites, 0, 2);
             side.Controls.Add(mBtnViewRecent, 0, 3);
             side.Controls.Add(mBtnViewRanking, 0, 4);
+            side.Controls.Add(mBtnViewOnline, 0, 5);
 
             Label manageTitle = MakeLabel("管理", 10, FontStyle.Bold, AppColor.SubText);
             manageTitle.Dock = DockStyle.Fill;
@@ -332,19 +372,33 @@ namespace _1113354_陳冠瑋
             heroMeta.ColumnCount = 2;
             heroMeta.RowCount = 1;
             heroMeta.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            heroMeta.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
+            heroMeta.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 330));
             heroMeta.BackColor = Color.Transparent;
             heroLayout.Controls.Add(heroMeta, 0, 0);
 
-            mLblSubtitle = MakeLabel("本機音樂庫 · MP3 / MP4 / WAV · 波形預覽", 10, FontStyle.Bold, Color.FromArgb(222, 226, 230));
+            mLblSubtitle = MakeLabel("本機音樂庫 · MP3 / MP4 / WAV · 線上搜尋 · 波形預覽", 10, FontStyle.Bold, Color.FromArgb(222, 226, 230));
             mLblSubtitle.Dock = DockStyle.Fill;
             mLblSubtitle.TextAlign = ContentAlignment.MiddleLeft;
             heroMeta.Controls.Add(mLblSubtitle, 0, 0);
 
+            TableLayoutPanel heroStatus = new TableLayoutPanel();
+            heroStatus.Dock = DockStyle.Fill;
+            heroStatus.ColumnCount = 1;
+            heroStatus.RowCount = 2;
+            heroStatus.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
+            heroStatus.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
+            heroStatus.BackColor = Color.Transparent;
+            heroMeta.Controls.Add(heroStatus, 1, 0);
+
             mLblStats = MakeLabel("0 首｜00:00｜收藏 0", 10, FontStyle.Bold, Color.FromArgb(222, 226, 230));
             mLblStats.Dock = DockStyle.Fill;
             mLblStats.TextAlign = ContentAlignment.MiddleRight;
-            heroMeta.Controls.Add(mLblStats, 1, 0);
+            heroStatus.Controls.Add(mLblStats, 0, 0);
+
+            mLblNetworkMode = MakeLabel("離線檢查中", 8, FontStyle.Bold, AppColor.SubText);
+            mLblNetworkMode.Dock = DockStyle.Fill;
+            mLblNetworkMode.TextAlign = ContentAlignment.MiddleRight;
+            heroStatus.Controls.Add(mLblNetworkMode, 0, 1);
 
             mLblTitle = MakeLabel("想聽什麼？", 26, FontStyle.Bold, Color.White);
             mLblTitle.Dock = DockStyle.Fill;
@@ -354,7 +408,7 @@ namespace _1113354_陳冠瑋
             Panel heroSearch = new Panel();
             heroSearch.Dock = DockStyle.Fill;
             heroSearch.Margin = new Padding(0, 0, 0, 14);
-            heroSearch.Padding = new Padding(16, 9, 16, 5);
+            heroSearch.Padding = new Padding(18, 7, 18, 7);
             heroSearch.BackColor = Color.FromArgb(34, 34, 34);
             heroLayout.Controls.Add(heroSearch, 0, 2);
 
@@ -362,12 +416,12 @@ namespace _1113354_陳冠瑋
             searchLayout.Dock = DockStyle.Fill;
             searchLayout.ColumnCount = 2;
             searchLayout.RowCount = 1;
-            searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 66));
+            searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 82));
             searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             searchLayout.BackColor = Color.FromArgb(34, 34, 34);
             heroSearch.Controls.Add(searchLayout);
 
-            Label searchIcon = MakeLabel("搜尋", 9, FontStyle.Bold, AppColor.SubText);
+            Label searchIcon = MakeLabel("搜尋：", 10, FontStyle.Bold, AppColor.SubText);
             searchIcon.Dock = DockStyle.Fill;
             searchIcon.TextAlign = ContentAlignment.MiddleLeft;
             searchLayout.Controls.Add(searchIcon, 0, 0);
@@ -378,7 +432,33 @@ namespace _1113354_陳冠瑋
             mTxtSearch.ForeColor = AppColor.Text;
             mTxtSearch.BorderStyle = BorderStyle.None;
             mTxtSearch.Font = new Font("Microsoft JhengHei UI", 11F, FontStyle.Regular);
-            mTxtSearch.TextChanged += delegate { RefreshList(); };
+            mTxtSearch.Margin = new Padding(0, 4, 0, 0);
+            mTxtSearch.TextChanged += delegate
+            {
+                if (_currentLibraryView == LibraryView.OnlineSearch)
+                    ScheduleOnlineSearch();
+                else
+                    RefreshList();
+            };
+            mTxtSearch.KeyDown += delegate (object sender, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    string keyword = mTxtSearch.Text.Trim();
+
+                    if (_currentLibraryView == LibraryView.OnlineSearch)
+                    {
+                        e.SuppressKeyPress = true;
+                        StartOnlineSearch(keyword);
+                    }
+                    else if (keyword.Length > 0)
+                    {
+                        e.SuppressKeyPress = true;
+                        SwitchLibraryView(LibraryView.OnlineSearch);
+                        StartOnlineSearch(keyword);
+                    }
+                }
+            };
             searchLayout.Controls.Add(mTxtSearch, 1, 0);
 
             TableLayoutPanel quickCards = new TableLayoutPanel();
@@ -445,7 +525,13 @@ namespace _1113354_陳冠瑋
             mList.Columns.Add("播放", 56);
             mList.Columns.Add("最近播放", 90);
             mList.Columns.Add("路徑", 360);
-            mList.DoubleClick += delegate { PlaySelectedOrCurrent(); };
+            mList.DoubleClick += delegate
+            {
+                if (_currentLibraryView == LibraryView.OnlineSearch)
+                    OpenSelectedOnlineResult();
+                else
+                    PlaySelectedOrCurrent();
+            };
             mList.SelectedIndexChanged += delegate { UpdateSelectedInfo(); };
             mList.DrawColumnHeader += List_DrawColumnHeader;
             mList.DrawSubItem += List_DrawSubItem;
@@ -510,15 +596,12 @@ namespace _1113354_陳冠瑋
             rightTitle.TextAlign = ContentAlignment.MiddleLeft;
             right.Controls.Add(rightTitle, 0, 0);
 
-            Panel cover = new Panel();
-            cover.Dock = DockStyle.Fill;
-            cover.Margin = new Padding(0, 0, 0, 12);
-            cover.BackColor = AppColor.Card2;
-            Label coverIcon = MakeLabel("♪", 36, FontStyle.Bold, AppColor.Accent2);
-            coverIcon.Dock = DockStyle.Fill;
-            coverIcon.TextAlign = ContentAlignment.MiddleCenter;
-            cover.Controls.Add(coverIcon);
-            right.Controls.Add(cover, 0, 1);
+            mDisc = new RotatingDiscView();
+            mDisc.Dock = DockStyle.Fill;
+            mDisc.Margin = new Padding(0, 0, 0, 12);
+            mDisc.TrackTitle = "MUSIC";
+            mDisc.IsPlaying = false;
+            right.Controls.Add(mDisc, 0, 1);
 
             mLblNow = MakeLabel("尚未播放", 11, FontStyle.Bold, AppColor.Text);
             mLblNow.Dock = DockStyle.Fill;
@@ -535,14 +618,9 @@ namespace _1113354_陳冠瑋
             pathTitle.TextAlign = ContentAlignment.BottomLeft;
             right.Controls.Add(pathTitle, 0, 4);
 
-            mTxtPath = new TextBox();
-            mTxtPath.ReadOnly = true;
-            mTxtPath.Multiline = true;
-            mTxtPath.ScrollBars = ScrollBars.Vertical;
-            mTxtPath.BorderStyle = BorderStyle.FixedSingle;
-            mTxtPath.BackColor = AppColor.Input;
-            mTxtPath.ForeColor = AppColor.SubText;
+            mTxtPath = new PathDisplayPanel();
             mTxtPath.Dock = DockStyle.Fill;
+            mTxtPath.Margin = new Padding(0, 2, 0, 8);
             right.Controls.Add(mTxtPath, 0, 5);
 
             ModernButton btnOpenFolder = MakeButton("在資料夾顯示", false);
@@ -581,7 +659,11 @@ namespace _1113354_陳冠瑋
             miniNowTitle.TextAlign = ContentAlignment.MiddleLeft;
             player.Controls.Add(miniNowTitle, 0, 0);
 
-            mLblTime = MakeLabel("00:00 / 00:00", 10, FontStyle.Bold, AppColor.Text);
+            mLblTime = new SmoothTimeLabel();
+            mLblTime.Text = "00:00 / 00:00";
+            mLblTime.ForeColor = AppColor.Text;
+            mLblTime.BackColor = AppColor.Card;
+            mLblTime.Font = new Font("Microsoft JhengHei UI", 10F, FontStyle.Bold);
             mLblTime.Dock = DockStyle.Fill;
             mLblTime.TextAlign = ContentAlignment.MiddleCenter;
             player.Controls.Add(mLblTime, 1, 0);
@@ -605,14 +687,15 @@ namespace _1113354_陳冠瑋
             mBtnMute = MakeButton("🔊", false);
 
             mBtnPrev.Width = 50;
-            mBtnPlay.Width = 66;
+            mBtnPlay.Width = 76;
             mBtnPause.Width = 50;
+            mBtnPause.Visible = false;
             mBtnStop.Width = 50;
             mBtnNext.Width = 50;
             mBtnMute.Width = 50;
 
             mBtnPrev.Click += delegate { PlayPrevious(); };
-            mBtnPlay.Click += delegate { PlaySelectedOrCurrent(); };
+            mBtnPlay.Click += delegate { TogglePause(); };
             mBtnPause.Click += delegate { TogglePause(); };
             mBtnStop.Click += delegate { StopPlayback(); };
             mBtnNext.Click += delegate { PlayNext(); };
@@ -620,7 +703,6 @@ namespace _1113354_陳冠瑋
 
             controlBar.Controls.Add(mBtnPrev);
             controlBar.Controls.Add(mBtnPlay);
-            controlBar.Controls.Add(mBtnPause);
             controlBar.Controls.Add(mBtnStop);
             controlBar.Controls.Add(mBtnNext);
             controlBar.Controls.Add(mBtnMute);
@@ -742,8 +824,8 @@ namespace _1113354_陳冠瑋
 
             ToolTip toolTip = new ToolTip();
             toolTip.SetToolTip(mBtnPrev, "上一首");
-            toolTip.SetToolTip(mBtnPlay, "播放");
-            toolTip.SetToolTip(mBtnPause, "暫停 / 繼續");
+            toolTip.SetToolTip(mBtnPlay, "播放 / 暫停");
+            toolTip.SetToolTip(mBtnPause, "播放 / 暫停");
             toolTip.SetToolTip(mBtnStop, "停止");
             toolTip.SetToolTip(mBtnNext, "下一首");
             toolTip.SetToolTip(mBtnMute, "切換靜音");
@@ -759,6 +841,126 @@ namespace _1113354_陳冠瑋
         }
 
 
+
+        private void BuildCustomTitleBar()
+        {
+            Panel bar = new Panel();
+            bar.Name = "mCustomTitleBar";
+            bar.Height = 44;
+            bar.Dock = DockStyle.Top;
+            bar.BackColor = Color.FromArgb(8, 8, 8);
+            bar.Padding = new Padding(14, 0, 10, 0);
+            bar.MouseDown += TitleBar_MouseDown;
+            Controls.Add(bar);
+            bar.BringToFront();
+
+            TableLayoutPanel layout = new TableLayoutPanel();
+            layout.Dock = DockStyle.Fill;
+            layout.ColumnCount = 4;
+            layout.RowCount = 1;
+            layout.BackColor = Color.Transparent;
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 46));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 420));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132));
+            layout.MouseDown += TitleBar_MouseDown;
+            bar.Controls.Add(layout);
+
+            Panel logo = new Panel();
+            logo.Dock = DockStyle.Fill;
+            logo.BackColor = Color.Transparent;
+            logo.Paint += delegate (object sender, PaintEventArgs e)
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle r = new Rectangle(6, 7, 30, 30);
+                using (LinearGradientBrush b = new LinearGradientBrush(r, AppColor.Accent, AppColor.Accent2, 45f))
+                    e.Graphics.FillEllipse(b, r);
+                using (Font f = new Font("Microsoft JhengHei UI", 16F, FontStyle.Bold))
+                using (SolidBrush wb = new SolidBrush(Color.White))
+                    e.Graphics.DrawString("♪", f, wb, new PointF(12, 5));
+            };
+            logo.MouseDown += TitleBar_MouseDown;
+            layout.Controls.Add(logo, 0, 0);
+
+            Label title = MakeLabel("Music Library", 12, FontStyle.Bold, AppColor.Text);
+            title.Dock = DockStyle.Fill;
+            title.TextAlign = ContentAlignment.MiddleLeft;
+            title.MouseDown += TitleBar_MouseDown;
+            layout.Controls.Add(title, 1, 0);
+
+            Label hint = MakeLabel("本機播放 · 線上搜尋 · 離線模式", 9, FontStyle.Regular, AppColor.SubText);
+            hint.Dock = DockStyle.Fill;
+            hint.TextAlign = ContentAlignment.MiddleRight;
+            hint.MouseDown += TitleBar_MouseDown;
+            layout.Controls.Add(hint, 2, 0);
+
+            FlowLayoutPanel buttons = new FlowLayoutPanel();
+            buttons.Dock = DockStyle.Fill;
+            buttons.FlowDirection = FlowDirection.RightToLeft;
+            buttons.WrapContents = false;
+            buttons.BackColor = Color.Transparent;
+            buttons.Padding = new Padding(0, 7, 0, 0);
+            layout.Controls.Add(buttons, 3, 0);
+
+            Button btnClose = MakeWindowButton("✕");
+            Button btnMax = MakeWindowButton("□");
+            Button btnMin = MakeWindowButton("—");
+
+            btnClose.Click += delegate { Close(); };
+            btnMax.Click += delegate
+            {
+                WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized;
+            };
+            btnMin.Click += delegate { WindowState = FormWindowState.Minimized; };
+
+            buttons.Controls.Add(btnClose);
+            buttons.Controls.Add(btnMax);
+            buttons.Controls.Add(btnMin);
+        }
+
+        private Button MakeWindowButton(string text)
+        {
+            Button btn = new Button();
+            btn.Text = text;
+            btn.Width = 38;
+            btn.Height = 28;
+            btn.Margin = new Padding(4, 0, 0, 0);
+            btn.FlatStyle = FlatStyle.Flat;
+            btn.FlatAppearance.BorderSize = 0;
+            btn.BackColor = AppColor.Button;
+            btn.ForeColor = AppColor.Text;
+            btn.Font = new Font("Microsoft JhengHei UI", 9F, FontStyle.Bold);
+            btn.Cursor = Cursors.Hand;
+            return btn;
+        }
+
+        private void TitleBar_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                ReleaseCapture();
+                SendMessage(Handle, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            }
+        }
+
+        private Icon CreateAppIcon()
+        {
+            Bitmap bmp = new Bitmap(32, 32);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+                Rectangle r = new Rectangle(3, 3, 26, 26);
+                using (LinearGradientBrush b = new LinearGradientBrush(r, AppColor.Accent, AppColor.Accent2, 45f))
+                    g.FillEllipse(b, r);
+                using (Font f = new Font("Microsoft JhengHei UI", 16F, FontStyle.Bold))
+                using (SolidBrush wb = new SolidBrush(Color.White))
+                    g.DrawString("♪", f, wb, new PointF(8, 5));
+            }
+
+            IntPtr hIcon = bmp.GetHicon();
+            return Icon.FromHandle(hIcon);
+        }
 
         private ModernButton MakeButton(string text, bool primary)
         {
@@ -985,6 +1187,13 @@ namespace _1113354_陳冠瑋
             if (mList == null)
                 return;
 
+            if (_currentLibraryView == LibraryView.OnlineSearch)
+            {
+                RefreshOnlineResultsList();
+                return;
+            }
+
+            EnsureTrackListColumns();
             TrackItem selected = GetSelectedTrack();
 
             mList.BeginUpdate();
@@ -1016,6 +1225,93 @@ namespace _1113354_陳冠瑋
 
                 if (selected != null && string.Equals(selected.Path, track.Path, StringComparison.OrdinalIgnoreCase))
                     item.Selected = true;
+            }
+
+            mList.EndUpdate();
+            UpdateListTitle();
+            UpdateNavigationButtons();
+        }
+
+        private void EnsureTrackListColumns()
+        {
+            if (mList == null)
+                return;
+
+            if (mList.Columns.Count > 0 && mList.Columns[1].Text == "檔名")
+                return;
+
+            mList.BeginUpdate();
+            mList.Columns.Clear();
+            mList.Columns.Add("", 34);
+            mList.Columns.Add("檔名", 250);
+            mList.Columns.Add("長度", 70);
+            mList.Columns.Add("格式", 70);
+            mList.Columns.Add("取樣率", 90);
+            mList.Columns.Add("聲道", 58);
+            mList.Columns.Add("位元", 58);
+            mList.Columns.Add("大小", 80);
+            mList.Columns.Add("播放", 56);
+            mList.Columns.Add("最近播放", 90);
+            mList.Columns.Add("路徑", 360);
+            mList.EndUpdate();
+        }
+
+        private void EnsureOnlineListColumns()
+        {
+            if (mList == null)
+                return;
+
+            if (mList.Columns.Count > 0 && mList.Columns[1].Text == "標題")
+                return;
+
+            mList.BeginUpdate();
+            mList.Columns.Clear();
+            mList.Columns.Add("來源", 86);
+            mList.Columns.Add("標題", 360);
+            mList.Columns.Add("歌手 / 頻道", 160);
+            mList.Columns.Add("說明", 260);
+            mList.Columns.Add("動作", 120);
+            mList.Columns.Add("連結", 380);
+            mList.EndUpdate();
+        }
+
+        private void RefreshOnlineResultsList()
+        {
+            EnsureOnlineListColumns();
+            UpdateNetworkMode(false);
+
+            mList.BeginUpdate();
+            mList.Items.Clear();
+
+            foreach (OnlineSearchItem result in _onlineResults)
+            {
+                ListViewItem item = new ListViewItem(result.Source);
+                item.Tag = result;
+                item.SubItems.Add(result.Title);
+                item.SubItems.Add(result.Creator);
+                item.SubItems.Add(result.Description);
+                item.SubItems.Add(GetOnlineActionText(result));
+                item.SubItems.Add(result.Url);
+                mList.Items.Add(item);
+            }
+
+            if (_onlineResults.Count == 0)
+            {
+                string msg;
+                if (!_networkAvailable)
+                    msg = "目前為離線模式，請加入本機檔案播放";
+                else if (_onlineSearchRunning)
+                    msg = "正在搜尋線上結果...";
+                else
+                    msg = "輸入關鍵字搜尋線上音樂";
+
+                ListViewItem hint = new ListViewItem("狀態");
+                hint.SubItems.Add(msg);
+                hint.SubItems.Add("");
+                hint.SubItems.Add("");
+                hint.SubItems.Add("");
+                hint.SubItems.Add("");
+                mList.Items.Add(hint);
             }
 
             mList.EndUpdate();
@@ -1078,7 +1374,14 @@ namespace _1113354_陳冠瑋
             else if (view == LibraryView.Recent)
                 SetStatus("已切換到近期播放。");
             else if (view == LibraryView.Ranking)
-                SetStatus("已切換到排行版。");
+                SetStatus("已切換到排行榜。");
+            else if (view == LibraryView.OnlineSearch)
+            {
+                UpdateNetworkMode(true);
+                SetStatus(_networkAvailable ? "已切換到線上搜尋。輸入歌曲名稱後按 Enter 或稍等自動搜尋。" : "目前為離線模式，只能播放本機檔案。");
+                if (_networkAvailable && mTxtSearch != null && mTxtSearch.Text.Trim().Length > 0)
+                    ScheduleOnlineSearch();
+            }
         }
 
         private void UpdateListTitle()
@@ -1093,15 +1396,19 @@ namespace _1113354_陳冠瑋
             else if (_currentLibraryView == LibraryView.Recent)
                 title = "近期播放";
             else if (_currentLibraryView == LibraryView.Ranking)
-                title = "排行版";
+                title = "排行榜";
+            else if (_currentLibraryView == LibraryView.OnlineSearch)
+                title = "線上搜尋";
 
-            int count = GetTracksForCurrentView().Count();
-            mLblListTitle.Text = title + "　" + count + " 首";
+            int count = _currentLibraryView == LibraryView.OnlineSearch ? _onlineResults.Count : GetTracksForCurrentView().Count();
+            mLblListTitle.Text = _currentLibraryView == LibraryView.OnlineSearch ? title + "　" + count + " 筆" : title + "　" + count + " 首";
 
             if (mLblTitle != null)
             {
                 if (_currentLibraryView == LibraryView.Playlist)
                     mLblTitle.Text = "想聽什麼？";
+                else if (_currentLibraryView == LibraryView.OnlineSearch)
+                    mLblTitle.Text = _networkAvailable ? "線上找音樂" : "離線模式";
                 else
                     mLblTitle.Text = title;
             }
@@ -1117,6 +1424,8 @@ namespace _1113354_陳冠瑋
                 mBtnViewRecent.Primary = _currentLibraryView == LibraryView.Recent;
             if (mBtnViewRanking != null)
                 mBtnViewRanking.Primary = _currentLibraryView == LibraryView.Ranking;
+            if (mBtnViewOnline != null)
+                mBtnViewOnline.Primary = _currentLibraryView == LibraryView.OnlineSearch;
 
             if (mBtnViewPlaylist != null)
                 mBtnViewPlaylist.Invalidate();
@@ -1126,6 +1435,8 @@ namespace _1113354_陳冠瑋
                 mBtnViewRecent.Invalidate();
             if (mBtnViewRanking != null)
                 mBtnViewRanking.Invalidate();
+            if (mBtnViewOnline != null)
+                mBtnViewOnline.Invalidate();
         }
 
         private void RegisterPlayback(TrackItem track)
@@ -1210,7 +1521,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private TrackItem GetSelectedTrack()
+        internal TrackItem GetSelectedTrack()
         {
             if (mList == null || mList.SelectedItems.Count == 0)
                 return null;
@@ -1220,6 +1531,12 @@ namespace _1113354_陳冠瑋
 
         private void PlaySelectedOrCurrent()
         {
+            if (_currentLibraryView == LibraryView.OnlineSearch)
+            {
+                OpenSelectedOnlineResult();
+                return;
+            }
+
             TrackItem selected = GetSelectedTrack();
 
             if (selected != null)
@@ -1250,7 +1567,7 @@ namespace _1113354_陳冠瑋
 
             if (!File.Exists(track.Path))
             {
-                MessageBox.Show("找不到檔案：\n" + track.Path, "檔案不存在", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                ModernDialog.Warning(this, "檔案不存在", "找不到檔案：" + Environment.NewLine + track.Path);
                 return;
             }
 
@@ -1286,8 +1603,9 @@ namespace _1113354_陳冠瑋
 
                 mTxtPath.Text = track.Path;
                 mLblNow.Text = "正在播放：" + track.FileName;
-                mBtnPlay.Text = "▶";
+                mBtnPlay.Text = "⏸";
                 mBtnPause.Text = "⏸";
+                UpdateDisc(track.FileName, true);
                 mLblAB.Text = "AB：未設定";
 
                 UpdateTimeDisplay(0, _durationMs);
@@ -1300,7 +1618,7 @@ namespace _1113354_陳冠瑋
             {
                 _playRequested = false;
                 CloseMci();
-                MessageBox.Show("播放失敗：\n" + ex.Message, "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ModernDialog.Error(this, "播放失敗", ex.Message);
             }
         }
 
@@ -1322,7 +1640,9 @@ namespace _1113354_陳冠瑋
                     RunMci("pause " + MciAlias, false);
 
                 _playRequested = false;
+                mBtnPlay.Text = "▶";
                 mBtnPause.Text = "▶";
+                UpdateDisc(null, false);
                 SetStatus("已暫停。");
             }
             else
@@ -1340,7 +1660,9 @@ namespace _1113354_陳冠瑋
                 }
 
                 _playRequested = true;
+                mBtnPlay.Text = "⏸";
                 mBtnPause.Text = "⏸";
+                UpdateDisc(_currentTrack == null ? null : _currentTrack.FileName, true);
                 SetStatus("繼續播放。");
             }
         }
@@ -1372,6 +1694,14 @@ namespace _1113354_陳冠瑋
 
             if (mVisualizer != null)
                 mVisualizer.Level = 0;
+
+            if (mBtnPlay != null)
+                mBtnPlay.Text = "▶";
+
+            if (mBtnPause != null)
+                mBtnPause.Text = "▶";
+
+            UpdateDisc(null, false);
 
             UpdateTimeDisplay(0, _durationMs);
             SetStatus("已停止。");
@@ -1458,6 +1788,13 @@ namespace _1113354_陳冠瑋
         private void HandleTrackEnded()
         {
             _playRequested = false;
+
+            if (_currentTrack == null)
+            {
+                StopPlayback();
+                SetStatus("線上預覽播放完畢。");
+                return;
+            }
 
             if (GetLoopMode() == 1 && _currentTrack != null)
             {
@@ -1677,14 +2014,15 @@ namespace _1113354_陳冠瑋
 
         private void ClearPlaylist()
         {
-            DialogResult result = MessageBox.Show(
+            bool confirm = ModernDialog.Confirm(
+                this,
+                "清空播放清單",
                 "確定要清空整個播放清單嗎？",
-                "清空確認",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question
+                "清空",
+                "取消"
             );
 
-            if (result == DialogResult.No)
+            if (!confirm)
                 return;
 
             CloseMci();
@@ -1699,6 +2037,7 @@ namespace _1113354_陳冠瑋
             mLblSelectedInfo.Text = "檔案資訊：尚未選取檔案";
             mWaveform.SetPeaks(null, 0);
             mVisualizer.Level = 0;
+            ResetDisc();
 
             RefreshList();
             UpdateStats();
@@ -1926,6 +2265,19 @@ namespace _1113354_陳冠瑋
 
         private void UpdateSelectedInfo()
         {
+            if (_currentLibraryView == LibraryView.OnlineSearch)
+            {
+                OnlineSearchItem result = GetSelectedOnlineResult();
+
+                if (result == null)
+                    return;
+
+                mTxtPath.Text = result.Url;
+                mLblSelectedInfo.Text = result.Source + "｜" + result.Creator + "｜" + result.Description;
+                mLblNow.Text = "線上結果：" + result.Title;
+                return;
+            }
+
             TrackItem selected = GetSelectedTrack();
 
             if (selected == null)
@@ -1965,6 +2317,12 @@ namespace _1113354_陳冠瑋
                 if (mVisualizer != null)
                     mVisualizer.Level = 0;
 
+                if (mDisc != null)
+                {
+                    mDisc.IsPlaying = false;
+                    mDisc.Invalidate();
+                }
+
                 return;
             }
 
@@ -2002,13 +2360,29 @@ namespace _1113354_陳冠瑋
 
             if (mode == "playing")
             {
-                if (mBtnPause.Text != "⏸")
+                if (mBtnPlay != null && mBtnPlay.Text != "⏸")
+                    mBtnPlay.Text = "⏸";
+                if (mBtnPause != null && mBtnPause.Text != "⏸")
                     mBtnPause.Text = "⏸";
+
+                if (mDisc != null)
+                {
+                    mDisc.IsPlaying = true;
+                    mDisc.Step();
+                }
             }
-            else if (mode == "paused")
+            else if (mode == "paused" || mode == "stopped")
             {
-                if (mBtnPause.Text != "▶")
+                if (mBtnPlay != null && mBtnPlay.Text != "▶")
+                    mBtnPlay.Text = "▶";
+                if (mBtnPause != null && mBtnPause.Text != "▶")
                     mBtnPause.Text = "▶";
+
+                if (mDisc != null)
+                {
+                    mDisc.IsPlaying = false;
+                    mDisc.Invalidate();
+                }
             }
 
             if (mVisualizer != null)
@@ -2069,6 +2443,1395 @@ namespace _1113354_陳冠瑋
                 }
             });
         }
+
+        private void ScheduleOnlineSearch()
+        {
+            if (mOnlineSearchTimer == null)
+                return;
+
+            if (_currentLibraryView != LibraryView.OnlineSearch)
+                return;
+
+            string keyword = mTxtSearch == null ? "" : mTxtSearch.Text.Trim();
+            if (keyword.Length == 0)
+            {
+                _onlineResults.Clear();
+                RefreshOnlineResultsList();
+                return;
+            }
+
+            mOnlineSearchTimer.Stop();
+            mOnlineSearchTimer.Start();
+        }
+
+        private void StartOnlineSearch(string keyword)
+        {
+            if (_currentLibraryView != LibraryView.OnlineSearch)
+                return;
+
+            keyword = keyword == null ? "" : keyword.Trim();
+
+            if (keyword.Length == 0)
+            {
+                _onlineResults.Clear();
+                RefreshOnlineResultsList();
+                return;
+            }
+
+            UpdateNetworkMode(true);
+
+            if (!_networkAvailable)
+            {
+                _onlineResults.Clear();
+                RefreshOnlineResultsList();
+                SetStatus("目前為離線模式，無法搜尋線上音樂。請加入本機檔案播放。");
+                return;
+            }
+
+            int stamp = ++_onlineSearchStamp;
+            _onlineSearchRunning = true;
+            RefreshOnlineResultsList();
+            SetStatus("正在搜尋線上音樂：" + keyword);
+
+            Task.Factory.StartNew(delegate
+            {
+                List<OnlineSearchItem> results = new List<OnlineSearchItem>();
+
+                try
+                {
+                    List<OnlineSearchItem> youtubeResults = SearchYouTubeFeedVideos(keyword, Math.Min(8, OnlineSearchLimit));
+
+                    if (youtubeResults.Count == 0)
+                        youtubeResults = SearchYouTubeWebVideos(keyword, Math.Min(8, OnlineSearchLimit));
+
+                    if (youtubeResults.Count == 0 && !string.IsNullOrWhiteSpace(YouTubeApiKey))
+                        youtubeResults = SearchYouTubeVideos(keyword, Math.Min(8, OnlineSearchLimit));
+
+                    if (youtubeResults.Count > 0)
+                        results.AddRange(youtubeResults);
+                    else
+                        results.Add(MakeYouTubeSearchShortcut(keyword));
+
+                    results.AddRange(SearchItunesMusic(keyword, OnlineSearchLimit));
+
+                    results.AddRange(SearchAudiusTracks(keyword, Math.Min(6, OnlineSearchLimit)));
+                    results.AddRange(SearchInternetArchiveAudio(keyword, Math.Min(6, OnlineSearchLimit)));
+                    results.AddRange(SearchRadioBrowserStations(keyword, Math.Min(6, OnlineSearchLimit)));
+                    results.AddRange(SearchPodcastEpisodes(keyword, 6));
+
+                    List<OnlineSearchItem> spotifyResults = SearchSpotifyTracks(keyword, Math.Min(8, OnlineSearchLimit));
+                    if (spotifyResults.Count > 0)
+                        results.AddRange(spotifyResults);
+                    else
+                        results.Add(MakeSpotifySearchShortcut(keyword));
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    if (IsDisposed)
+                        return;
+
+                    BeginInvoke(new Action(delegate
+                    {
+                        if (stamp != _onlineSearchStamp)
+                            return;
+
+                        _onlineResults.Clear();
+                        _onlineResults.AddRange(results);
+                        _onlineSearchRunning = false;
+                        RefreshOnlineResultsList();
+
+                        if (_onlineResults.Count > 0)
+                            SetStatus("搜尋完成：" + keyword + "，找到 " + _onlineResults.Count + " 筆結果。");
+                        else
+                            SetStatus("沒有找到線上結果。可以換個關鍵字再試試。 ");
+                    }));
+                }
+                catch
+                {
+                }
+            });
+        }
+
+        private void UpdateNetworkMode(bool force)
+        {
+            if (!force && (DateTime.Now - _lastNetworkCheck).TotalSeconds < 20)
+            {
+                UpdateNetworkLabel();
+                return;
+            }
+
+            _lastNetworkCheck = DateTime.Now;
+            _networkAvailable = CheckInternetAvailable();
+            UpdateNetworkLabel();
+        }
+
+        private void UpdateNetworkLabel()
+        {
+            if (mLblNetworkMode != null)
+            {
+                string mode = _networkAvailable ? "線上模式" : "離線模式";
+                mLblNetworkMode.Text = mode;
+                mLblNetworkMode.ForeColor = _networkAvailable ? AppColor.Accent2 : AppColor.SubText;
+            }
+
+            if (mLblSubtitle != null)
+            {
+                if (_currentLibraryView == LibraryView.OnlineSearch)
+                    mLblSubtitle.Text = _networkAvailable ? "線上搜尋 · Apple 預覽 · Audius/Internet Archive/Podcast/Radio 完整播放 · YouTube/Spotify 外部開啟" : "離線模式 · 只能播放本機檔案";
+                else
+                    mLblSubtitle.Text = "本機音樂庫 · MP3 / MP4 / WAV · 線上搜尋 · 波形預覽";
+            }
+        }
+
+        private static bool CheckInternetAvailable()
+        {
+            if (!NetworkInterface.GetIsNetworkAvailable())
+                return false;
+
+            return ProbeInternet("https://www.google.com/generate_204") ||
+                   ProbeInternet("http://www.msftconnecttest.com/connecttest.txt");
+        }
+
+        private static bool ProbeInternet(string url)
+        {
+            try
+            {
+                HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+                request.Method = "GET";
+                request.Timeout = 2500;
+                request.ReadWriteTimeout = 2500;
+                request.UserAgent = "Mozilla/5.0";
+
+                using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                    return ((int)response.StatusCode >= 200 && (int)response.StatusCode < 400);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private OnlineSearchItem GetSelectedOnlineResult()
+        {
+            if (mList == null || mList.SelectedItems.Count == 0)
+                return null;
+
+            return mList.SelectedItems[0].Tag as OnlineSearchItem;
+        }
+
+        private void OpenSelectedOnlineResult()
+        {
+            OnlineSearchItem item = GetSelectedOnlineResult();
+
+            if (item == null)
+            {
+                SetStatus("請先選取一筆線上搜尋結果。");
+                return;
+            }
+
+            // 有直接音訊 URL 的來源會在本機播放器播放：Apple Music 是預覽；Audius / Internet Archive / Podcast / Radio 是完整或直播音訊。
+            if (!string.IsNullOrWhiteSpace(item.DirectMediaUrl))
+            {
+                PlayOnlinePreview(item);
+                return;
+            }
+
+            // YouTube：搜尋結果仍顯示在 WinForms 清單中，雙擊後用 Edge App / 預設瀏覽器開啟完整內容。
+            // 這是免 WebView2、免 NuGet 時最穩定的完整播放方式。
+            if (IsYouTubeUrl(item.Url))
+            {
+                OpenEdgeAppUrl(item.Url);
+                SetStatus("已開啟 YouTube 完整內容：" + item.Title);
+                return;
+            }
+
+            // Spotify：若已設定 Spotify API 金鑰，這裡會是直接歌曲結果；否則會是搜尋入口。
+            // 完整播放仍需使用 Spotify 網頁 / App 與帳號權限。
+            if (IsSpotifyUrl(item.Url) || string.Equals(item.Source, "Spotify", StringComparison.OrdinalIgnoreCase))
+            {
+                OpenEdgeAppUrl(item.Url);
+                SetStatus("已開啟 Spotify 內容：" + item.Title);
+                return;
+            }
+
+            OpenOnlineMediaPlayer(item);
+        }
+
+        private static string GetOnlineActionText(OnlineSearchItem item)
+        {
+            if (item == null)
+                return "";
+
+            if (!string.IsNullOrWhiteSpace(item.DirectMediaUrl))
+            {
+                if (string.Equals(item.Source, "Apple Music", StringComparison.OrdinalIgnoreCase))
+                    return "本機預覽";
+                if (string.Equals(item.Source, "Radio Browser", StringComparison.OrdinalIgnoreCase))
+                    return "本機直播";
+                return "本機播放";
+            }
+
+            if (IsYouTubeUrl(item.Url))
+            {
+                string id = string.IsNullOrWhiteSpace(item.VideoId) ? ExtractYouTubeVideoId(item.Url) : item.VideoId;
+                return string.IsNullOrWhiteSpace(id) ? "開啟搜尋" : "完整開啟";
+            }
+
+            if (IsSpotifyUrl(item.Url) || string.Equals(item.Source, "Spotify", StringComparison.OrdinalIgnoreCase))
+                return "Spotify 開啟";
+
+            return "開啟";
+        }
+
+        private void OpenOnlineMediaPlayer(OnlineSearchItem item)
+        {
+            if (item == null || string.IsNullOrWhiteSpace(item.Url))
+                return;
+
+            try
+            {
+                OnlineMediaPlayerForm page = new OnlineMediaPlayerForm(item);
+                page.Show(this);
+                SetStatus("已開啟內嵌線上播放器：" + item.Title);
+            }
+            catch (Exception ex)
+            {
+                ModernDialog.Error(this, "開啟播放器失敗", ex.Message);
+            }
+        }
+
+        private void PlayOnlinePreview(OnlineSearchItem item)
+        {
+            if (item == null || string.IsNullOrWhiteSpace(item.DirectMediaUrl))
+                return;
+
+            try
+            {
+                CloseMci();
+                EnsureWmpPlayer();
+                WmpSetUrl(item.DirectMediaUrl);
+                _useWmp = true;
+                _wmpOpen = true;
+                _mciOpen = true;
+                _currentTrack = null;
+                _durationMs = item.DurationMs > 0 ? item.DurationMs : 0;
+                _lastPositionMs = 0;
+                _loopA = -1;
+                _loopB = -1;
+
+                ApplyVolume();
+                ApplySpeed();
+                WmpPlay();
+
+                _playRequested = true;
+                mTxtPath.Text = item.Url;
+                bool previewOnly = string.Equals(item.Source, "Apple Music", StringComparison.OrdinalIgnoreCase);
+                mLblNow.Text = (previewOnly ? "線上預覽：" : "線上播放：") + item.Title;
+                mLblSelectedInfo.Text = item.Source + "｜" + item.Creator + "｜" + item.Description;
+                UpdateDisc(item.Title, true);
+                mLblAB.Text = "AB：未設定";
+                UpdateTimeDisplay(0, _durationMs);
+
+                if (mWaveform != null)
+                    mWaveform.SetPeaks(null, _durationMs);
+
+                RefreshList();
+                SetStatus((previewOnly ? "正在播放線上預覽：" : "正在播放線上完整音訊：") + item.Title);
+            }
+            catch (Exception ex)
+            {
+                ModernDialog.Error(this, "線上播放失敗", ex.Message);
+            }
+        }
+
+        private static void OpenExternalUrl(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+                return;
+
+            try
+            {
+                Process.Start(url);
+            }
+            catch
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private static void OpenEdgeAppUrl(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+                return;
+
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.FileName = "msedge.exe";
+                psi.Arguments = "--app=\"" + url + "\"";
+                psi.UseShellExecute = true;
+                Process.Start(psi);
+            }
+            catch
+            {
+                OpenExternalUrl(url);
+            }
+        }
+
+        private static OnlineSearchItem MakeYouTubeSearchShortcut(string keyword)
+        {
+            string q = Uri.EscapeDataString(keyword ?? "");
+            return new OnlineSearchItem
+            {
+                Source = "YouTube",
+                Title = "在 YouTube 搜尋：" + keyword,
+                Creator = "YouTube",
+                Description = "找不到個別影片時，雙擊在本機視窗開啟 YouTube 搜尋頁",
+                Url = "https://www.youtube.com/results?search_query=" + q,
+                DirectMediaUrl = "",
+                DurationMs = 0
+            };
+        }
+
+        private static OnlineSearchItem MakeSpotifySearchShortcut(string keyword)
+        {
+            string q = Uri.EscapeDataString(keyword ?? "");
+            return new OnlineSearchItem
+            {
+                Source = "Spotify",
+                Title = "在 Spotify 搜尋：" + keyword,
+                Creator = "Spotify",
+                Description = string.IsNullOrWhiteSpace(SpotifyClientId) || string.IsNullOrWhiteSpace(SpotifyClientSecret) ? "未設定 Spotify API 金鑰，因此顯示搜尋入口；雙擊開啟 Spotify。" : "雙擊開啟 Spotify 搜尋頁；完整播放通常需要登入 Spotify。",
+                Url = "https://open.spotify.com/search/" + q,
+                DirectMediaUrl = "",
+                DurationMs = 0
+            };
+        }
+
+
+        private static List<OnlineSearchItem> SearchAudiusTracks(string keyword, int limit)
+        {
+            List<OnlineSearchItem> results = new List<OnlineSearchItem>();
+
+            if (string.IsNullOrWhiteSpace(keyword))
+                return results;
+
+            try
+            {
+                string appName = Uri.EscapeDataString(AudiusAppName);
+                string url = "https://discoveryprovider.audius.co/v1/tracks/search?query=" + Uri.EscapeDataString(keyword) + "&limit=" + limit + "&app_name=" + appName;
+                string json = DownloadText(url);
+                int dataIndex = json.IndexOf("\"data\"", StringComparison.OrdinalIgnoreCase);
+                List<string> objects = JsonExtractObjectsFromArray(json, dataIndex);
+
+                foreach (string obj in objects)
+                {
+                    string id = JsonGetTopLevelString(obj, "id");
+                    string title = JsonGetTopLevelString(obj, "title");
+                    long seconds = JsonGetTopLevelLong(obj, "duration");
+                    string artist = JsonGetAudiusUserName(obj);
+                    string permalink = JsonGetTopLevelString(obj, "permalink");
+
+                    if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(title))
+                        continue;
+
+                    string streamUrl = "https://discoveryprovider.audius.co/v1/tracks/" + Uri.EscapeDataString(id) + "/stream?app_name=" + appName;
+
+                    results.Add(new OnlineSearchItem
+                    {
+                        Source = "Audius",
+                        Title = title,
+                        Creator = string.IsNullOrWhiteSpace(artist) ? "Audius" : artist,
+                        Description = "完整創作者音樂，可在本機播放",
+                        Url = string.IsNullOrWhiteSpace(permalink) ? streamUrl : permalink,
+                        DirectMediaUrl = streamUrl,
+                        DurationMs = seconds > 0 ? seconds * 1000 : 0
+                    });
+                }
+            }
+            catch
+            {
+            }
+
+            return results;
+        }
+
+        private static List<OnlineSearchItem> SearchInternetArchiveAudio(string keyword, int limit)
+        {
+            List<OnlineSearchItem> results = new List<OnlineSearchItem>();
+
+            if (string.IsNullOrWhiteSpace(keyword))
+                return results;
+
+            try
+            {
+                int rows = Math.Max(1, Math.Min(6, limit));
+                string query = "mediatype:audio AND (title:(" + keyword + ") OR creator:(" + keyword + ") OR description:(" + keyword + "))";
+                string url = "https://archive.org/advancedsearch.php?q=" + Uri.EscapeDataString(query) +
+                             "&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=description&rows=" + rows +
+                             "&page=1&output=json";
+
+                string json = DownloadText(url);
+                int docsIndex = json.IndexOf("\"docs\"", StringComparison.OrdinalIgnoreCase);
+                List<string> objects = JsonExtractObjectsFromArray(json, docsIndex);
+
+                foreach (string obj in objects)
+                {
+                    if (results.Count >= limit)
+                        break;
+
+                    string identifier = JsonGetTopLevelString(obj, "identifier");
+                    string title = JsonGetTopLevelString(obj, "title");
+                    string creator = JsonGetTopLevelString(obj, "creator");
+                    string desc = JsonGetTopLevelString(obj, "description");
+
+                    if (string.IsNullOrWhiteSpace(identifier))
+                        continue;
+
+                    string directAudio = GetInternetArchivePlayableAudioUrl(identifier);
+                    if (string.IsNullOrWhiteSpace(directAudio))
+                        continue;
+
+                    results.Add(new OnlineSearchItem
+                    {
+                        Source = "Internet Archive",
+                        Title = string.IsNullOrWhiteSpace(title) ? identifier : title,
+                        Creator = string.IsNullOrWhiteSpace(creator) ? "Internet Archive" : creator,
+                        Description = string.IsNullOrWhiteSpace(desc) ? "公開音訊資料，可在本機播放完整音訊" : Shorten(desc, 90),
+                        Url = "https://archive.org/details/" + Uri.EscapeDataString(identifier),
+                        DirectMediaUrl = directAudio,
+                        DurationMs = 0
+                    });
+                }
+            }
+            catch
+            {
+            }
+
+            return results;
+        }
+
+        private static string GetInternetArchivePlayableAudioUrl(string identifier)
+        {
+            if (string.IsNullOrWhiteSpace(identifier))
+                return "";
+
+            try
+            {
+                string metadataUrl = "https://archive.org/metadata/" + Uri.EscapeDataString(identifier);
+                string json = DownloadText(metadataUrl);
+                int filesIndex = json.IndexOf("\"files\"", StringComparison.OrdinalIgnoreCase);
+                List<string> files = JsonExtractObjectsFromArray(json, filesIndex);
+
+                string fallback = "";
+
+                foreach (string fileObj in files)
+                {
+                    string name = JsonGetTopLevelString(fileObj, "name");
+                    string format = JsonGetTopLevelString(fileObj, "format");
+
+                    if (string.IsNullOrWhiteSpace(name))
+                        continue;
+
+                    if (!IsPlayableArchiveAudioFile(name, format))
+                        continue;
+
+                    string encodedName = Uri.EscapeDataString(name).Replace("%2F", "/");
+                    string url = "https://archive.org/download/" + Uri.EscapeDataString(identifier) + "/" + encodedName;
+
+                    if (name.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase) ||
+                        (!string.IsNullOrWhiteSpace(format) && format.IndexOf("MP3", StringComparison.OrdinalIgnoreCase) >= 0))
+                        return url;
+
+                    if (string.IsNullOrWhiteSpace(fallback))
+                        fallback = url;
+                }
+
+                return fallback;
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        private static bool IsPlayableArchiveAudioFile(string name, string format)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                return false;
+
+            string lower = name.ToLowerInvariant();
+
+            if (lower.EndsWith(".mp3") || lower.EndsWith(".m4a") || lower.EndsWith(".wav") || lower.EndsWith(".wma"))
+                return true;
+
+            if (!string.IsNullOrWhiteSpace(format))
+            {
+                if (format.IndexOf("MP3", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    format.IndexOf("MPEG", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    format.IndexOf("Wave", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static List<OnlineSearchItem> SearchRadioBrowserStations(string keyword, int limit)
+        {
+            List<OnlineSearchItem> results = new List<OnlineSearchItem>();
+
+            if (string.IsNullOrWhiteSpace(keyword))
+                return results;
+
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int safeLimit = Math.Max(1, Math.Min(8, limit));
+            string q = Uri.EscapeDataString(keyword);
+
+            // name：搜尋電台名稱；tag/language：補強日文、中文、韓文、英文等語系或類型關鍵字。
+            AddRadioBrowserResults(results, seen, "https://de1.api.radio-browser.info/json/stations/search?hidebroken=true&order=clickcount&reverse=true&limit=" + safeLimit + "&name=" + q, limit);
+            AddRadioBrowserResults(results, seen, "https://de1.api.radio-browser.info/json/stations/search?hidebroken=true&order=clickcount&reverse=true&limit=" + safeLimit + "&tag=" + q, limit);
+            AddRadioBrowserResults(results, seen, "https://de1.api.radio-browser.info/json/stations/search?hidebroken=true&order=clickcount&reverse=true&limit=" + safeLimit + "&language=" + q, limit);
+
+            return results;
+        }
+
+        private static void AddRadioBrowserResults(List<OnlineSearchItem> results, HashSet<string> seen, string url, int limit)
+        {
+            if (results == null || seen == null || string.IsNullOrWhiteSpace(url))
+                return;
+
+            try
+            {
+                string json = DownloadText(url);
+                List<string> objects = JsonExtractObjectsFromArray(json, 0);
+
+                foreach (string obj in objects)
+                {
+                    if (results.Count >= limit)
+                        break;
+
+                    string name = JsonGetTopLevelString(obj, "name");
+                    string stream = JsonGetTopLevelString(obj, "url_resolved");
+                    if (string.IsNullOrWhiteSpace(stream))
+                        stream = JsonGetTopLevelString(obj, "url");
+                    string country = JsonGetTopLevelString(obj, "country");
+                    string language = JsonGetTopLevelString(obj, "language");
+                    string codec = JsonGetTopLevelString(obj, "codec");
+                    string homepage = JsonGetTopLevelString(obj, "homepage");
+
+                    if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(stream))
+                        continue;
+
+                    string dedupeKey = stream.Trim();
+                    if (seen.Contains(dedupeKey))
+                        continue;
+                    seen.Add(dedupeKey);
+
+                    string desc = "線上電台直播";
+                    if (!string.IsNullOrWhiteSpace(country) || !string.IsNullOrWhiteSpace(language))
+                        desc += "｜" + country + " " + language;
+                    if (!string.IsNullOrWhiteSpace(codec))
+                        desc += "｜" + codec;
+
+                    results.Add(new OnlineSearchItem
+                    {
+                        Source = "Radio Browser",
+                        Title = name,
+                        Creator = string.IsNullOrWhiteSpace(country) ? "Internet Radio" : country,
+                        Description = desc.Trim(),
+                        Url = string.IsNullOrWhiteSpace(homepage) ? stream : homepage,
+                        DirectMediaUrl = stream,
+                        DurationMs = 0
+                    });
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static List<OnlineSearchItem> SearchPodcastEpisodes(string keyword, int limit)
+        {
+            List<OnlineSearchItem> results = new List<OnlineSearchItem>();
+
+            if (string.IsNullOrWhiteSpace(keyword))
+                return results;
+
+            try
+            {
+                int podcastLimit = Math.Max(1, Math.Min(3, limit));
+                string url = "https://itunes.apple.com/search?media=podcast&entity=podcast&country=TW&limit=" + podcastLimit + "&term=" + Uri.EscapeDataString(keyword);
+                string json = DownloadText(url);
+                MatchCollection matches = Regex.Matches(json, "\\{[^{}]*\\}");
+
+                foreach (Match match in matches)
+                {
+                    if (results.Count >= limit)
+                        break;
+
+                    string obj = match.Value;
+                    string feedUrl = JsonGetString(obj, "feedUrl");
+                    string collection = JsonGetString(obj, "collectionName");
+                    string artist = JsonGetString(obj, "artistName");
+
+                    if (string.IsNullOrWhiteSpace(feedUrl))
+                        continue;
+
+                    AddPodcastEpisodesFromFeed(results, feedUrl, collection, artist, limit);
+                }
+            }
+            catch
+            {
+            }
+
+            return results;
+        }
+
+        private static void AddPodcastEpisodesFromFeed(List<OnlineSearchItem> results, string feedUrl, string collectionName, string artistName, int limit)
+        {
+            try
+            {
+                string xml = DownloadText(feedUrl);
+                MatchCollection items = Regex.Matches(xml, "<item(?:\\s[^>]*)?>(?<item>.*?)</item>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                foreach (Match itemMatch in items)
+                {
+                    if (results.Count >= limit)
+                        break;
+
+                    string itemXml = itemMatch.Groups["item"].Value;
+                    string title = CleanXmlText(XmlTag(itemXml, "title"));
+                    string desc = CleanXmlText(XmlTag(itemXml, "description"));
+                    string enclosure = Regex.Match(itemXml, "<enclosure[^>]*\\surl=[\"'](?<url>[^\"']+)[\"'][^>]*>", RegexOptions.IgnoreCase).Groups["url"].Value;
+                    string type = Regex.Match(itemXml, "<enclosure[^>]*\\stype=[\"'](?<type>[^\"']+)[\"'][^>]*>", RegexOptions.IgnoreCase).Groups["type"].Value;
+
+                    if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(enclosure))
+                        continue;
+
+                    if (!string.IsNullOrWhiteSpace(type) && type.IndexOf("audio", StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
+
+                    results.Add(new OnlineSearchItem
+                    {
+                        Source = "Apple Podcasts",
+                        Title = title,
+                        Creator = string.IsNullOrWhiteSpace(artistName) ? collectionName : artistName,
+                        Description = string.IsNullOrWhiteSpace(collectionName) ? Shorten(desc, 90) : collectionName,
+                        Url = feedUrl,
+                        DirectMediaUrl = WebUtility.HtmlDecode(enclosure),
+                        DurationMs = 0
+                    });
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static string JsonGetAudiusUserName(string trackObject)
+        {
+            Match match = Regex.Match(trackObject, "\\\"user\\\"\\s*:\\s*\\{.*?\\\"name\\\"\\s*:\\s*\\\"(?<name>(?:\\\\.|[^\\\"\\\\])*)\\\"", RegexOptions.Singleline);
+            if (match.Success)
+                return JsonDecode(match.Groups["name"].Value);
+            return "";
+        }
+
+        private static string CleanXmlText(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "";
+
+            value = value.Trim();
+            if (value.StartsWith("<![CDATA[", StringComparison.OrdinalIgnoreCase) && value.EndsWith("]]>", StringComparison.OrdinalIgnoreCase))
+                value = value.Substring(9, value.Length - 12);
+
+            value = Regex.Replace(value, "<.*?>", "");
+            return WebUtility.HtmlDecode(value).Trim();
+        }
+
+        private static string Shorten(string value, int maxLength)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "";
+
+            value = value.Replace("\r", " ").Replace("\n", " ").Trim();
+            if (value.Length <= maxLength)
+                return value;
+
+            return value.Substring(0, Math.Max(0, maxLength - 3)) + "...";
+        }
+
+        private static List<OnlineSearchItem> SearchSpotifyTracks(string keyword, int limit)
+        {
+            List<OnlineSearchItem> results = new List<OnlineSearchItem>();
+
+            if (string.IsNullOrWhiteSpace(keyword))
+                return results;
+
+            if (string.IsNullOrWhiteSpace(SpotifyClientId) || string.IsNullOrWhiteSpace(SpotifyClientSecret))
+                return results;
+
+            try
+            {
+                string token = GetSpotifyAccessToken();
+
+                if (string.IsNullOrWhiteSpace(token))
+                    return results;
+
+                string url = "https://api.spotify.com/v1/search?type=track&market=TW&limit=" + limit + "&q=" + Uri.EscapeDataString(keyword);
+                string json = DownloadTextWithAuthorization(url, "Bearer " + token);
+
+                int tracksIndex = json.IndexOf("\"tracks\"", StringComparison.OrdinalIgnoreCase);
+                int itemsIndex = tracksIndex < 0 ? -1 : json.IndexOf("\"items\"", tracksIndex, StringComparison.OrdinalIgnoreCase);
+
+                if (itemsIndex < 0)
+                    return results;
+
+                List<string> itemObjects = JsonExtractObjectsFromArray(json, itemsIndex);
+
+                foreach (string obj in itemObjects)
+                {
+                    string title = JsonGetTopLevelString(obj, "name");
+                    string spotifyUrl = JsonGetSpotifyExternalUrl(obj);
+                    string artist = JsonGetFirstArtistName(obj);
+                    long duration = JsonGetTopLevelLong(obj, "duration_ms");
+
+                    if (string.IsNullOrWhiteSpace(title))
+                        continue;
+
+                    if (string.IsNullOrWhiteSpace(spotifyUrl))
+                        spotifyUrl = "https://open.spotify.com/search/" + Uri.EscapeDataString(title + " " + artist);
+
+                    results.Add(new OnlineSearchItem
+                    {
+                        Source = "Spotify",
+                        Title = title,
+                        Creator = string.IsNullOrWhiteSpace(artist) ? "Spotify" : artist,
+                        Description = "Spotify 搜尋結果；雙擊開啟 Spotify 完整頁面。",
+                        Url = spotifyUrl,
+                        DirectMediaUrl = "",
+                        DurationMs = duration
+                    });
+                }
+            }
+            catch
+            {
+            }
+
+            return results;
+        }
+
+        private static string GetSpotifyAccessToken()
+        {
+            try
+            {
+                HttpWebRequest request = (HttpWebRequest)WebRequest.Create("https://accounts.spotify.com/api/token");
+                request.Method = "POST";
+                request.Timeout = 8000;
+                request.ReadWriteTimeout = 8000;
+                request.UserAgent = "Mozilla/5.0";
+                request.ContentType = "application/x-www-form-urlencoded";
+
+                string rawAuth = SpotifyClientId + ":" + SpotifyClientSecret;
+                string auth = Convert.ToBase64String(Encoding.UTF8.GetBytes(rawAuth));
+                request.Headers[HttpRequestHeader.Authorization] = "Basic " + auth;
+
+                byte[] body = Encoding.UTF8.GetBytes("grant_type=client_credentials");
+                request.ContentLength = body.Length;
+
+                using (Stream requestStream = request.GetRequestStream())
+                    requestStream.Write(body, 0, body.Length);
+
+                using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                using (Stream stream = response.GetResponseStream())
+                using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
+                {
+                    string json = reader.ReadToEnd();
+                    return JsonGetString(json, "access_token");
+                }
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        private static string DownloadTextWithAuthorization(string url, string authorization)
+        {
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "GET";
+            request.Timeout = 8000;
+            request.ReadWriteTimeout = 8000;
+            request.UserAgent = "Mozilla/5.0";
+
+            if (!string.IsNullOrWhiteSpace(authorization))
+                request.Headers[HttpRequestHeader.Authorization] = authorization;
+
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            using (Stream stream = response.GetResponseStream())
+            using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
+                return reader.ReadToEnd();
+        }
+
+        private static List<OnlineSearchItem> SearchItunesMusic(string keyword, int limit)
+        {
+            List<OnlineSearchItem> results = new List<OnlineSearchItem>();
+            string url = "https://itunes.apple.com/search?media=music&entity=song&country=TW&limit=" + limit + "&term=" + Uri.EscapeDataString(keyword);
+            string json = DownloadText(url);
+
+            MatchCollection matches = Regex.Matches(json, "\\{[^{}]*\\}");
+
+            foreach (Match match in matches)
+            {
+                string obj = match.Value;
+                string trackName = JsonGetString(obj, "trackName");
+
+                if (string.IsNullOrWhiteSpace(trackName))
+                    continue;
+
+                string artist = JsonGetString(obj, "artistName");
+                string album = JsonGetString(obj, "collectionName");
+                string trackUrl = JsonGetString(obj, "trackViewUrl");
+                string previewUrl = JsonGetString(obj, "previewUrl");
+                long duration = JsonGetLong(obj, "trackTimeMillis");
+
+                results.Add(new OnlineSearchItem
+                {
+                    Source = "Apple Music",
+                    Title = trackName,
+                    Creator = artist,
+                    Description = string.IsNullOrWhiteSpace(album) ? "雙擊播放 Apple Music 預覽" : album,
+                    Url = string.IsNullOrWhiteSpace(trackUrl) ? previewUrl : trackUrl,
+                    DirectMediaUrl = previewUrl,
+                    DurationMs = duration > 0 ? Math.Min(duration, 30000) : 30000
+                });
+            }
+
+            return results;
+        }
+
+        private static List<OnlineSearchItem> SearchYouTubeFeedVideos(string keyword, int limit)
+        {
+            List<OnlineSearchItem> results = new List<OnlineSearchItem>();
+
+            if (string.IsNullOrWhiteSpace(keyword))
+                return results;
+
+            try
+            {
+                string url = "https://www.youtube.com/feeds/videos.xml?search_query=" + Uri.EscapeDataString(keyword);
+                string xml = DownloadText(url);
+
+                MatchCollection entries = Regex.Matches(xml, "<entry>(?<entry>.*?)</entry>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                foreach (Match entryMatch in entries)
+                {
+                    if (results.Count >= limit)
+                        break;
+
+                    string entry = entryMatch.Groups["entry"].Value;
+                    string videoId = XmlTag(entry, "yt:videoId");
+
+                    if (string.IsNullOrWhiteSpace(videoId))
+                    {
+                        string idText = XmlTag(entry, "id");
+                        const string prefix = "yt:video:";
+                        if (!string.IsNullOrWhiteSpace(idText) && idText.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                            videoId = idText.Substring(prefix.Length);
+                    }
+
+                    if (string.IsNullOrWhiteSpace(videoId))
+                        continue;
+
+                    string title = XmlTag(entry, "title");
+                    string authorBlock = Regex.Match(entry, "<author>(?<author>.*?)</author>", RegexOptions.Singleline | RegexOptions.IgnoreCase).Groups["author"].Value;
+                    string channel = XmlTag(authorBlock, "name");
+
+                    results.Add(new OnlineSearchItem
+                    {
+                        Source = "YouTube",
+                        Title = string.IsNullOrWhiteSpace(title) ? "YouTube 影片" : title,
+                        Creator = string.IsNullOrWhiteSpace(channel) ? "YouTube" : channel,
+                        Description = "雙擊用 Edge App / 預設瀏覽器完整播放 YouTube",
+                        Url = "https://www.youtube.com/watch?v=" + videoId,
+                        DirectMediaUrl = "",
+                        VideoId = videoId,
+                        DurationMs = 0
+                    });
+                }
+            }
+            catch
+            {
+            }
+
+            return results;
+        }
+
+        private static string XmlTag(string xml, string tagName)
+        {
+            if (string.IsNullOrWhiteSpace(xml) || string.IsNullOrWhiteSpace(tagName))
+                return "";
+
+            Match match = Regex.Match(xml, "<" + Regex.Escape(tagName) + "(?:\\s[^>]*)?>(?<v>.*?)</" + Regex.Escape(tagName) + ">", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+            if (!match.Success)
+                return "";
+
+            return WebUtility.HtmlDecode(match.Groups["v"].Value.Trim());
+        }
+
+        private static List<OnlineSearchItem> SearchYouTubeWebVideos(string keyword, int limit)
+        {
+            List<OnlineSearchItem> results = new List<OnlineSearchItem>();
+
+            if (string.IsNullOrWhiteSpace(keyword))
+                return results;
+
+            try
+            {
+                string url = "https://www.youtube.com/results?search_query=" + Uri.EscapeDataString(keyword);
+                string html = DownloadText(url);
+                HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                MatchCollection videoBlocks = Regex.Matches(
+                    html,
+                    "\\\"videoRenderer\\\"\\s*:\\s*\\{(?<block>.*?)\\\"ownerText\\\"",
+                    RegexOptions.Singleline
+                );
+
+                foreach (Match blockMatch in videoBlocks)
+                {
+                    if (results.Count >= limit)
+                        break;
+
+                    string block = blockMatch.Groups["block"].Value;
+                    string videoId = Regex.Match(block, "\\\"videoId\\\"\\s*:\\s*\\\"(?<id>[A-Za-z0-9_-]{6,})\\\"").Groups["id"].Value;
+
+                    if (string.IsNullOrWhiteSpace(videoId) || seen.Contains(videoId))
+                        continue;
+
+                    string title = "";
+                    Match titleMatch = Regex.Match(block, "\\\"title\\\"\\s*:\\s*\\{.*?\\\"text\\\"\\s*:\\s*\\\"(?<title>(?:\\\\.|[^\\\"\\\\])*)\\\"", RegexOptions.Singleline);
+                    if (titleMatch.Success)
+                        title = JsonDecode(titleMatch.Groups["title"].Value);
+
+                    string channel = "YouTube";
+                    Match channelMatch = Regex.Match(block, "\\\"shortBylineText\\\"\\s*:\\s*\\{.*?\\\"text\\\"\\s*:\\s*\\\"(?<channel>(?:\\\\.|[^\\\"\\\\])*)\\\"", RegexOptions.Singleline);
+                    if (channelMatch.Success)
+                        channel = JsonDecode(channelMatch.Groups["channel"].Value);
+
+                    seen.Add(videoId);
+                    results.Add(new OnlineSearchItem
+                    {
+                        Source = "YouTube",
+                        Title = string.IsNullOrWhiteSpace(title) ? "YouTube 影片" : WebUtility.HtmlDecode(title),
+                        Creator = string.IsNullOrWhiteSpace(channel) ? "YouTube" : WebUtility.HtmlDecode(channel),
+                        Description = "雙擊用 Edge App / 預設瀏覽器完整播放 YouTube",
+                        Url = "https://www.youtube.com/watch?v=" + videoId,
+                        DirectMediaUrl = "",
+                        VideoId = videoId,
+                        DurationMs = 0
+                    });
+                }
+
+                if (results.Count == 0)
+                {
+                    MatchCollection compact = Regex.Matches(html, "\\\"videoId\\\"\\s*:\\s*\\\"(?<id>[A-Za-z0-9_-]{8,})\\\".*?\\\"title\\\"\\s*:\\s*\\{.*?\\\"text\\\"\\s*:\\s*\\\"(?<title>(?:\\\\.|[^\\\"\\\\])*)\\\"", RegexOptions.Singleline);
+
+                    foreach (Match match in compact)
+                    {
+                        if (results.Count >= limit)
+                            break;
+
+                        string id = match.Groups["id"].Value;
+                        if (seen.Contains(id))
+                            continue;
+
+                        seen.Add(id);
+                        results.Add(new OnlineSearchItem
+                        {
+                            Source = "YouTube",
+                            Title = JsonDecode(match.Groups["title"].Value),
+                            Creator = "YouTube",
+                            Description = "雙擊用 Edge App / 預設瀏覽器完整播放 YouTube",
+                            Url = "https://www.youtube.com/watch?v=" + id,
+                            DirectMediaUrl = "",
+                            VideoId = id,
+                            DurationMs = 0
+                        });
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return results;
+        }
+
+        private static List<OnlineSearchItem> SearchYouTubeVideos(string keyword, int limit)
+        {
+            List<OnlineSearchItem> results = new List<OnlineSearchItem>();
+
+            if (string.IsNullOrWhiteSpace(YouTubeApiKey))
+                return results;
+
+            string url = "https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=" + limit + "&q=" + Uri.EscapeDataString(keyword) + "&key=" + Uri.EscapeDataString(YouTubeApiKey);
+            string json = DownloadText(url);
+
+            MatchCollection matches = Regex.Matches(json, "\\\"videoId\\\"\\s*:\\s*\\\"(?<id>[^\\\"]+)\\\".*?\\\"title\\\"\\s*:\\s*\\\"(?<title>(?:\\\\.|[^\\\"\\\\])*)\\\".*?\\\"channelTitle\\\"\\s*:\\s*\\\"(?<channel>(?:\\\\.|[^\\\"\\\\])*)\\\"", RegexOptions.Singleline);
+
+            foreach (Match match in matches)
+            {
+                string id = match.Groups["id"].Value;
+                string title = JsonDecode(match.Groups["title"].Value);
+                string channel = JsonDecode(match.Groups["channel"].Value);
+
+                results.Add(new OnlineSearchItem
+                {
+                    Source = "YouTube",
+                    Title = title,
+                    Creator = channel,
+                    Description = "雙擊用 Edge App / 預設瀏覽器完整播放 YouTube",
+                    Url = "https://www.youtube.com/watch?v=" + id,
+                    DirectMediaUrl = "",
+                    VideoId = id,
+                    DurationMs = 0
+                });
+            }
+
+            return results;
+        }
+
+        private static bool IsYouTubeUrl(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+                return false;
+
+            return url.IndexOf("youtube.com", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   url.IndexOf("youtu.be", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsSpotifyUrl(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+                return false;
+
+            return url.IndexOf("spotify.com", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   url.IndexOf("spotify:", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static string ExtractYouTubeVideoId(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+                return "";
+
+            Match watch = Regex.Match(url, "[?&]v=(?<id>[A-Za-z0-9_-]{6,})");
+            if (watch.Success)
+                return watch.Groups["id"].Value;
+
+            Match embed = Regex.Match(url, "youtube\\.com/embed/(?<id>[A-Za-z0-9_-]{6,})", RegexOptions.IgnoreCase);
+            if (embed.Success)
+                return embed.Groups["id"].Value;
+
+            Match shortUrl = Regex.Match(url, "youtu\\.be/(?<id>[A-Za-z0-9_-]{6,})", RegexOptions.IgnoreCase);
+            if (shortUrl.Success)
+                return shortUrl.Groups["id"].Value;
+
+            return "";
+        }
+
+        private static List<string> JsonExtractObjectsFromArray(string json, int arrayNameIndex)
+        {
+            List<string> objects = new List<string>();
+
+            if (string.IsNullOrWhiteSpace(json) || arrayNameIndex < 0 || arrayNameIndex >= json.Length)
+                return objects;
+
+            int arrayStart = json.IndexOf('[', arrayNameIndex);
+            if (arrayStart < 0)
+                return objects;
+
+            bool inString = false;
+            bool escape = false;
+            int depth = 0;
+            int objectStart = -1;
+
+            for (int i = arrayStart + 1; i < json.Length; i++)
+            {
+                char c = json[i];
+
+                if (escape)
+                {
+                    escape = false;
+                    continue;
+                }
+
+                if (c == '\\' && inString)
+                {
+                    escape = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    inString = !inString;
+                    continue;
+                }
+
+                if (inString)
+                    continue;
+
+                if (c == '{')
+                {
+                    if (depth == 0)
+                        objectStart = i;
+                    depth++;
+                }
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0 && objectStart >= 0)
+                    {
+                        objects.Add(json.Substring(objectStart, i - objectStart + 1));
+                        objectStart = -1;
+                    }
+                }
+                else if (c == ']' && depth == 0)
+                {
+                    break;
+                }
+            }
+
+            return objects;
+        }
+
+        private static string JsonGetTopLevelString(string jsonObject, string propertyName)
+        {
+            int valueStart = JsonFindTopLevelPropertyValue(jsonObject, propertyName);
+            if (valueStart < 0 || valueStart >= jsonObject.Length || jsonObject[valueStart] != '"')
+                return "";
+
+            StringBuilder raw = new StringBuilder();
+            bool escape = false;
+
+            for (int i = valueStart + 1; i < jsonObject.Length; i++)
+            {
+                char c = jsonObject[i];
+
+                if (escape)
+                {
+                    raw.Append('\\');
+                    raw.Append(c);
+                    escape = false;
+                    continue;
+                }
+
+                if (c == '\\')
+                {
+                    escape = true;
+                    continue;
+                }
+
+                if (c == '"')
+                    break;
+
+                raw.Append(c);
+            }
+
+            return JsonDecode(raw.ToString());
+        }
+
+        private static long JsonGetTopLevelLong(string jsonObject, string propertyName)
+        {
+            int valueStart = JsonFindTopLevelPropertyValue(jsonObject, propertyName);
+            if (valueStart < 0 || valueStart >= jsonObject.Length)
+                return 0;
+
+            int end = valueStart;
+            while (end < jsonObject.Length && (char.IsDigit(jsonObject[end]) || jsonObject[end] == '-'))
+                end++;
+
+            long value;
+            if (long.TryParse(jsonObject.Substring(valueStart, end - valueStart), out value))
+                return value;
+
+            return 0;
+        }
+
+        private static int JsonFindTopLevelPropertyValue(string jsonObject, string propertyName)
+        {
+            if (string.IsNullOrWhiteSpace(jsonObject) || string.IsNullOrWhiteSpace(propertyName))
+                return -1;
+
+            string key = "\"" + propertyName + "\"";
+            bool inString = false;
+            bool escape = false;
+            int depth = 0;
+
+            for (int i = 0; i < jsonObject.Length; i++)
+            {
+                char c = jsonObject[i];
+
+                if (escape)
+                {
+                    escape = false;
+                    continue;
+                }
+
+                if (c == '\\' && inString)
+                {
+                    escape = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    if (!inString && depth == 1 && i + key.Length <= jsonObject.Length && string.Compare(jsonObject, i, key, 0, key.Length, StringComparison.Ordinal) == 0)
+                    {
+                        int colon = jsonObject.IndexOf(':', i + key.Length);
+                        if (colon < 0)
+                            return -1;
+
+                        int valueStart = colon + 1;
+                        while (valueStart < jsonObject.Length && char.IsWhiteSpace(jsonObject[valueStart]))
+                            valueStart++;
+
+                        return valueStart;
+                    }
+
+                    inString = !inString;
+                    continue;
+                }
+
+                if (inString)
+                    continue;
+
+                if (c == '{') depth++;
+                else if (c == '}') depth--;
+            }
+
+            return -1;
+        }
+
+        private static string JsonGetFirstArtistName(string trackObject)
+        {
+            int artistsIndex = trackObject.IndexOf("\"artists\"", StringComparison.OrdinalIgnoreCase);
+            if (artistsIndex < 0)
+                return "";
+
+            List<string> artists = JsonExtractObjectsFromArray(trackObject, artistsIndex);
+            if (artists.Count == 0)
+                return "";
+
+            return JsonGetTopLevelString(artists[0], "name");
+        }
+
+        private static string JsonGetSpotifyExternalUrl(string trackObject)
+        {
+            Match match = Regex.Match(trackObject, "\\\"external_urls\\\"\\s*:\\s*\\{[^{}]*\\\"spotify\\\"\\s*:\\s*\\\"(?<url>(?:\\\\.|[^\\\"\\\\])*)\\\"", RegexOptions.Singleline);
+
+            if (match.Success)
+                return JsonDecode(match.Groups["url"].Value);
+
+            return "";
+        }
+
+        private static string DownloadText(string url)
+        {
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "GET";
+            request.Timeout = 8000;
+            request.ReadWriteTimeout = 8000;
+            request.UserAgent = "Mozilla/5.0";
+
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            using (Stream stream = response.GetResponseStream())
+            using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
+                return reader.ReadToEnd();
+        }
+
+        private static string JsonGetString(string jsonObject, string propertyName)
+        {
+            Match match = Regex.Match(jsonObject, "\\\"" + Regex.Escape(propertyName) + "\\\"\\s*:\\s*\\\"(?<v>(?:\\\\.|[^\\\"\\\\])*)\\\"");
+
+            if (!match.Success)
+                return "";
+
+            return JsonDecode(match.Groups["v"].Value);
+        }
+
+        private static long JsonGetLong(string jsonObject, string propertyName)
+        {
+            Match match = Regex.Match(jsonObject, "\\\"" + Regex.Escape(propertyName) + "\\\"\\s*:\\s*(?<v>-?\\d+)");
+
+            if (!match.Success)
+                return 0;
+
+            long value;
+            if (long.TryParse(match.Groups["v"].Value, out value))
+                return value;
+
+            return 0;
+        }
+
+        private static string JsonDecode(string value)
+        {
+            if (value == null)
+                return "";
+
+            StringBuilder sb = new StringBuilder();
+
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+
+                if (c == '\\' && i + 1 < value.Length)
+                {
+                    char n = value[++i];
+
+                    if (n == '"') sb.Append('"');
+                    else if (n == '\\') sb.Append('\\');
+                    else if (n == '/') sb.Append('/');
+                    else if (n == 'b') sb.Append('\b');
+                    else if (n == 'f') sb.Append('\f');
+                    else if (n == 'n') sb.Append('\n');
+                    else if (n == 'r') sb.Append('\r');
+                    else if (n == 't') sb.Append('\t');
+                    else if (n == 'u' && i + 4 < value.Length)
+                    {
+                        string hex = value.Substring(i + 1, 4);
+                        int code;
+                        if (int.TryParse(hex, System.Globalization.NumberStyles.HexNumber, null, out code))
+                        {
+                            sb.Append((char)code);
+                            i += 4;
+                        }
+                    }
+                    else
+                    {
+                        sb.Append(n);
+                    }
+                }
+                else
+                {
+                    sb.Append(c);
+                }
+            }
+
+            return sb.ToString();
+        }
+
 
         private long GetLengthSafe()
         {
@@ -2149,6 +3912,14 @@ namespace _1113354_陳冠瑋
             _playRequested = false;
             _durationMs = 0;
             _lastPositionMs = 0;
+
+            if (mBtnPlay != null)
+                mBtnPlay.Text = "▶";
+
+            if (mBtnPause != null)
+                mBtnPause.Text = "▶";
+
+            UpdateDisc(null, false);
         }
 
         private static bool ShouldUseWmpPlayback(string path)
@@ -2478,16 +4249,17 @@ namespace _1113354_陳冠瑋
 
         private void UpdateTimeDisplay(long posMs, long totalMs)
         {
-            if (mLblTime != null)
-                mLblTime.Text = FormatTime(posMs) + " / " + FormatTime(totalMs);
-            {
-                string newText = FormatTime(posMs) + " / " + FormatTime(totalMs);
-                if (mLblTime.Text != newText)
-                    mLblTime.Text = newText;
-            }
+            if (mLblTime == null)
+                return;
+
+            // 只在顯示文字真的改變時更新，避免 Timer 每 160ms 重繪 Label 造成閃爍。
+            string newText = FormatTime(posMs) + " / " + FormatTime(totalMs);
+
+            if (!string.Equals(mLblTime.Text, newText, StringComparison.Ordinal))
+                mLblTime.Text = newText;
         }
 
-        private static string FormatTime(long ms)
+        internal static string FormatTime(long ms)
         {
             if (ms < 0)
                 ms = 0;
@@ -2500,7 +4272,7 @@ namespace _1113354_陳冠瑋
             return string.Format("{0:D2}:{1:D2}", t.Minutes, t.Seconds);
         }
 
-        private static string FormatBytes(long bytes)
+        internal static string FormatBytes(long bytes)
         {
             if (bytes < 1024)
                 return bytes + " B";
@@ -2522,6 +4294,28 @@ namespace _1113354_陳冠瑋
         {
             if (mLblStatus != null)
                 mLblStatus.Text = DateTime.Now.ToString("HH:mm:ss") + "　" + text;
+        }
+
+        private void UpdateDisc(string title, bool isPlaying)
+        {
+            if (mDisc == null)
+                return;
+
+            if (!string.IsNullOrWhiteSpace(title))
+                mDisc.TrackTitle = title;
+
+            mDisc.IsPlaying = isPlaying;
+            mDisc.Invalidate();
+        }
+
+        private void ResetDisc()
+        {
+            if (mDisc == null)
+                return;
+
+            mDisc.TrackTitle = "MUSIC";
+            mDisc.IsPlaying = false;
+            mDisc.Invalidate();
         }
 
         private void SaveSession()
@@ -2755,14 +4549,15 @@ namespace _1113354_陳冠瑋
 
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            DialogResult result = MessageBox.Show(
-                "確定要關閉目前音樂庫嗎？",
+            bool confirm = ModernDialog.Confirm(
+                this,
                 "關閉確認",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question
+                "確定要關閉目前音樂庫嗎？",
+                "關閉",
+                "取消"
             );
 
-            if (result == DialogResult.No)
+            if (!confirm)
             {
                 e.Cancel = true;
                 return;
@@ -2862,7 +4657,419 @@ namespace _1113354_陳冠瑋
             Close();
         }
 
-        private class AudioToolboxForm : Form
+
+    internal class OnlineSearchItem
+        {
+            public string Source { get; set; }
+            public string Title { get; set; }
+            public string Creator { get; set; }
+            public string Description { get; set; }
+            public string Url { get; set; }
+            public string DirectMediaUrl { get; set; }
+            public string VideoId { get; set; }
+            public long DurationMs { get; set; }
+        }
+
+        internal class OnlineMediaPlayerForm : Form
+        {
+            private readonly OnlineSearchItem _item;
+            private readonly string _videoId;
+            private Panel _hostPanel;
+            private Label _title;
+            private Label _hint;
+            private Control _webViewControl;
+            private object _webView;
+            private object _coreWebView2;
+            private bool _useWatchPage = false;
+            private Button _switchModeButton;
+
+            public OnlineMediaPlayerForm(OnlineSearchItem item)
+            {
+                _item = item;
+                _videoId = item == null ? "" : (string.IsNullOrWhiteSpace(item.VideoId) ? ExtractYouTubeVideoId(item.Url) : item.VideoId);
+                BuildUI();
+            }
+
+            private void BuildUI()
+            {
+                Text = _item == null ? "線上多媒體播放器" : _item.Title;
+                Size = new Size(1100, 720);
+                MinimumSize = new Size(900, 560);
+                StartPosition = FormStartPosition.CenterParent;
+                BackColor = Color.FromArgb(10, 10, 10);
+                ForeColor = Color.White;
+                Font = new Font("Microsoft JhengHei UI", 10F);
+
+                TableLayoutPanel root = new TableLayoutPanel();
+                root.Dock = DockStyle.Fill;
+                root.RowCount = 3;
+                root.ColumnCount = 1;
+                root.Padding = new Padding(14);
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
+                root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+                root.BackColor = Color.FromArgb(10, 10, 10);
+                Controls.Add(root);
+
+                TableLayoutPanel top = new TableLayoutPanel();
+                top.Dock = DockStyle.Fill;
+                top.ColumnCount = 4;
+                top.RowCount = 1;
+                top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+                top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
+                top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
+                top.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+                root.Controls.Add(top, 0, 0);
+
+                _title = new Label();
+                _title.Dock = DockStyle.Fill;
+                _title.ForeColor = Color.White;
+                _title.Font = new Font("Microsoft JhengHei UI", 14F, FontStyle.Bold);
+                _title.TextAlign = ContentAlignment.MiddleLeft;
+                _title.AutoEllipsis = true;
+                _title.Text = _item == null ? "線上多媒體播放器" : _item.Source + "｜" + _item.Title;
+                top.Controls.Add(_title, 0, 0);
+
+                _switchModeButton = MakeTopButton("網頁播放");
+                _switchModeButton.Visible = !string.IsNullOrWhiteSpace(_videoId);
+                _switchModeButton.Click += delegate
+                {
+                    _useWatchPage = !_useWatchPage;
+                    _switchModeButton.Text = _useWatchPage ? "嵌入播放" : "網頁播放";
+                    NavigateCurrentItem();
+                };
+                top.Controls.Add(_switchModeButton, 1, 0);
+
+                Button openExternal = MakeTopButton("外部開啟");
+                openExternal.Click += delegate
+                {
+                    if (_item != null)
+                        OpenExternalUrl(_item.Url);
+                };
+                top.Controls.Add(openExternal, 2, 0);
+
+                Button close = MakeTopButton("關閉");
+                close.Click += delegate { Close(); };
+                top.Controls.Add(close, 3, 0);
+
+                _hostPanel = new Panel();
+                _hostPanel.Dock = DockStyle.Fill;
+                _hostPanel.BackColor = Color.Black;
+                root.Controls.Add(_hostPanel, 0, 1);
+
+                _hint = new Label();
+                _hint.Dock = DockStyle.Fill;
+                _hint.ForeColor = Color.FromArgb(170, 170, 170);
+                _hint.BackColor = Color.FromArgb(10, 10, 10);
+                _hint.Font = new Font("Microsoft JhengHei UI", 9F, FontStyle.Regular);
+                _hint.TextAlign = ContentAlignment.MiddleLeft;
+                _hint.AutoEllipsis = true;
+                root.Controls.Add(_hint, 0, 2);
+
+                Shown += delegate { LoadOnlinePage(); };
+            }
+
+            private static Button MakeTopButton(string text)
+            {
+                Button btn = new Button();
+                btn.Text = text;
+                btn.Dock = DockStyle.Fill;
+                btn.Margin = new Padding(6, 10, 0, 10);
+                btn.FlatStyle = FlatStyle.Flat;
+                btn.FlatAppearance.BorderSize = 0;
+                btn.BackColor = Color.FromArgb(30, 30, 30);
+                btn.ForeColor = Color.White;
+                btn.Font = new Font("Microsoft JhengHei UI", 9F, FontStyle.Bold);
+                btn.Cursor = Cursors.Hand;
+                return btn;
+            }
+
+            private async void LoadOnlinePage()
+            {
+                if (_hostPanel == null || _item == null)
+                    return;
+
+                bool ok = await TryLoadWebView2DynamicallyAsync();
+
+                if (!ok)
+                    ShowFallbackPlayer();
+            }
+
+            private async Task<bool> TryLoadWebView2DynamicallyAsync()
+            {
+                try
+                {
+                    Type webViewType = Type.GetType("Microsoft.Web.WebView2.WinForms.WebView2, Microsoft.Web.WebView2.WinForms", false);
+
+                    if (webViewType == null)
+                        return false;
+
+                    object instance = Activator.CreateInstance(webViewType);
+                    Control control = instance as Control;
+
+                    if (control == null)
+                        return false;
+
+                    _webView = instance;
+                    _webViewControl = control;
+                    _webViewControl.Dock = DockStyle.Fill;
+                    _webViewControl.BackColor = Color.Black;
+
+                    _hostPanel.Controls.Clear();
+                    _hostPanel.Controls.Add(_webViewControl);
+
+                    _hint.Text = "正在啟動 WebView2 播放器...";
+
+                    object taskObject = InvokeMethod(_webView, "EnsureCoreWebView2Async", new object[] { null });
+                    Task task = taskObject as Task;
+
+                    if (task != null)
+                        await task;
+
+                    _coreWebView2 = GetProperty(_webView, "CoreWebView2");
+
+                    if (_coreWebView2 != null)
+                    {
+                        object settings = GetProperty(_coreWebView2, "Settings");
+
+                        if (settings != null)
+                        {
+                            TrySetProperty(settings, "AreDefaultContextMenusEnabled", true);
+                            TrySetProperty(settings, "AreDevToolsEnabled", false);
+                            TrySetProperty(settings, "IsScriptEnabled", true);
+                            TrySetProperty(settings, "IsWebMessageEnabled", true);
+                        }
+                    }
+
+                    NavigateCurrentItem();
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
+            private void NavigateCurrentItem()
+            {
+                if (_webView == null || _item == null)
+                    return;
+
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(_videoId))
+                    {
+                        string url = _useWatchPage
+                            ? "https://www.youtube.com/watch?v=" + Uri.EscapeDataString(_videoId)
+                            : "https://www.youtube.com/embed/" + Uri.EscapeDataString(_videoId) + "?autoplay=1&rel=0&modestbranding=1";
+
+                        TrySetProperty(_webView, "Source", new Uri(url));
+                        _hint.Text = _useWatchPage
+                            ? "使用 WebView2 顯示 YouTube 網頁播放頁。若影片仍無法播放，請按「外部開啟」。"
+                            : "使用 WebView2 內嵌 YouTube 官方播放器播放完整影音；若該影片禁止嵌入，請按「網頁播放」。";
+                        return;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(_item.DirectMediaUrl))
+                    {
+                        InvokeMethod(_webView, "NavigateToString", new object[] { BuildAudioPreviewHtml(_item.Title, _item.Creator, _item.DirectMediaUrl, _item.Url) });
+                        _hint.Text = "Apple Music / iTunes 官方只提供 previewUrl，因此此處只能播放預覽音源。";
+                        return;
+                    }
+
+                    string url2 = string.IsNullOrWhiteSpace(_item.Url) ? "about:blank" : _item.Url;
+                    TrySetProperty(_webView, "Source", new Uri(url2));
+                    _hint.Text = "使用 WebView2 顯示線上平台頁面。";
+                }
+                catch
+                {
+                    ShowFallbackPlayer();
+                }
+            }
+
+            private void ShowFallbackPlayer()
+            {
+                if (_hostPanel == null)
+                    return;
+
+                _hostPanel.Controls.Clear();
+
+                TableLayoutPanel panel = new TableLayoutPanel();
+                panel.Dock = DockStyle.Fill;
+                panel.BackColor = Color.Black;
+                panel.Padding = new Padding(28);
+                panel.RowCount = 5;
+                panel.ColumnCount = 1;
+                panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
+                panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
+                panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+                panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+                panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+                _hostPanel.Controls.Add(panel);
+
+                Label title = new Label();
+                title.Dock = DockStyle.Fill;
+                title.Text = string.IsNullOrWhiteSpace(_videoId) ? "線上內容" : "YouTube 完整播放";
+                title.ForeColor = Color.White;
+                title.Font = new Font("Microsoft JhengHei UI", 24F, FontStyle.Bold);
+                title.TextAlign = ContentAlignment.MiddleLeft;
+                panel.Controls.Add(title, 0, 0);
+
+                Label msg = new Label();
+                msg.Dock = DockStyle.Fill;
+                msg.Text = "此電腦或此專案目前沒有 WebView2 控制項，因此不會造成程式無法啟動。\n若要在 WinForms 內嵌播放 YouTube，請在專案中加入 Microsoft.Web.WebView2；否則會改用 Edge App 模式播放。";
+                msg.ForeColor = Color.FromArgb(190, 190, 190);
+                msg.Font = new Font("Microsoft JhengHei UI", 11F, FontStyle.Regular);
+                msg.TextAlign = ContentAlignment.MiddleLeft;
+                panel.Controls.Add(msg, 0, 1);
+
+                Button appButton = MakeTopButton("用 Edge App 模式播放完整內容");
+                appButton.Dock = DockStyle.Left;
+                appButton.Width = 280;
+                appButton.Click += delegate { OpenEdgeAppUrl(GetPlayableUrl()); };
+                panel.Controls.Add(appButton, 0, 2);
+
+                Button browserButton = MakeTopButton("用預設瀏覽器開啟");
+                browserButton.Dock = DockStyle.Left;
+                browserButton.Width = 220;
+                browserButton.Click += delegate { OpenExternalUrl(GetPlayableUrl()); };
+                panel.Controls.Add(browserButton, 0, 3);
+
+                Label detail = new Label();
+                detail.Dock = DockStyle.Fill;
+                detail.Text = "目前內容：" + (_item == null ? "" : _item.Title) + "\n連結：" + GetPlayableUrl();
+                detail.ForeColor = Color.FromArgb(130, 130, 130);
+                detail.Font = new Font("Consolas", 9F, FontStyle.Regular);
+                detail.TextAlign = ContentAlignment.TopLeft;
+                panel.Controls.Add(detail, 0, 4);
+
+                _hint.Text = "沒有 WebView2 時仍可正常執行；YouTube 完整播放會改用 Edge App / 瀏覽器模式。";
+
+                if (!string.IsNullOrWhiteSpace(_videoId))
+                {
+                    try
+                    {
+                        BeginInvoke(new Action(delegate { OpenEdgeAppUrl(GetPlayableUrl()); }));
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+
+            private string GetPlayableUrl()
+            {
+                if (!string.IsNullOrWhiteSpace(_videoId))
+                    return "https://www.youtube.com/watch?v=" + _videoId;
+
+                if (_item != null && !string.IsNullOrWhiteSpace(_item.Url))
+                    return _item.Url;
+
+                return "about:blank";
+            }
+
+            private static void OpenEdgeAppUrl(string url)
+            {
+                if (string.IsNullOrWhiteSpace(url))
+                    return;
+
+                try
+                {
+                    ProcessStartInfo psi = new ProcessStartInfo();
+                    psi.FileName = "msedge.exe";
+                    psi.Arguments = "--app=\"" + url + "\"";
+                    psi.UseShellExecute = true;
+                    Process.Start(psi);
+                }
+                catch
+                {
+                    OpenExternalUrl(url);
+                }
+            }
+
+            private static object GetProperty(object target, string name)
+            {
+                if (target == null)
+                    return null;
+
+                try
+                {
+                    return target.GetType().InvokeMember(name, System.Reflection.BindingFlags.GetProperty, null, target, null);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            private static void TrySetProperty(object target, string name, object value)
+            {
+                if (target == null)
+                    return;
+
+                try
+                {
+                    target.GetType().InvokeMember(name, System.Reflection.BindingFlags.SetProperty, null, target, new object[] { value });
+                }
+                catch
+                {
+                }
+            }
+
+            private static object InvokeMethod(object target, string name, object[] args)
+            {
+                if (target == null)
+                    return null;
+
+                try
+                {
+                    return target.GetType().InvokeMember(name, System.Reflection.BindingFlags.InvokeMethod, null, target, args);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            private static string BuildAudioPreviewHtml(string title, string creator, string mediaUrl, string pageUrl)
+            {
+                string safeTitle = Html(title);
+                string safeCreator = Html(creator);
+                string safeMedia = HtmlAttributeUrl(mediaUrl);
+                string safePage = HtmlAttributeUrl(pageUrl);
+
+                return "<!doctype html><html><head><meta charset='utf-8'>" +
+                       "<style>html,body{margin:0;width:100%;height:100%;background:#101010;color:#fff;font-family:Segoe UI,Microsoft JhengHei,sans-serif;}" +
+                       ".wrap{height:100%;display:flex;align-items:center;justify-content:center;padding:32px;box-sizing:border-box;}" +
+                       ".card{width:min(720px,90vw);border-radius:28px;background:linear-gradient(135deg,#1db954,#4f46e5,#ff7a59);padding:2px;box-shadow:0 30px 80px rgba(0,0,0,.45);}" +
+                       ".inner{border-radius:26px;background:#181818;padding:34px;}h1{margin:0 0 8px;font-size:28px;}p{color:#aaa;margin:0 0 28px;font-size:16px;}" +
+                       "audio{width:100%;height:48px;}a{display:inline-block;margin-top:24px;color:#1ed760;text-decoration:none;font-weight:700;}" +
+                       "</style></head><body><div class='wrap'><div class='card'><div class='inner'>" +
+                       "<h1>" + safeTitle + "</h1><p>" + safeCreator + "｜Apple Music / iTunes 預覽</p>" +
+                       "<audio controls autoplay src='" + safeMedia + "'></audio>" +
+                       "<br><a href='" + safePage + "' target='_blank'>開啟完整歌曲頁面</a>" +
+                       "</div></div></div></body></html>";
+            }
+
+            private static string Html(string value)
+            {
+                if (value == null)
+                    return "";
+
+                return value.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
+            }
+
+            private static string HtmlAttributeUrl(string value)
+            {
+                if (value == null)
+                    return "";
+
+                return Html(value).Replace("'", "&#39;");
+            }
+        }
+
+
+        internal class AudioToolboxForm : Form
         {
             private readonly Form1 _host;
             private TextBox _log;
@@ -2955,7 +5162,7 @@ namespace _1113354_陳冠瑋
                     catch (Exception ex)
                     {
                         WriteLog("錯誤：" + ex.Message);
-                        MessageBox.Show(ex.Message, "操作失敗", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        ModernDialog.Error(this, "操作失敗", ex.Message);
                     }
                 };
 
@@ -3307,7 +5514,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private class DashboardForm : Form
+        internal class DashboardForm : Form
         {
             private readonly Form1 _host;
             private Label _summary;
@@ -3445,7 +5652,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private class TrackItem
+        internal class TrackItem
         {
             public string Path;
             public string FileName;
@@ -3504,7 +5711,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private class AudioInfo
+        internal class AudioInfo
         {
             public short Channels;
             public int SampleRate;
@@ -3577,7 +5784,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private static class SimpleAudioDuration
+        internal static class SimpleAudioDuration
         {
             public static long GetDurationMs(string path)
             {
@@ -3812,7 +6019,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private static class MciAudioInfo
+        internal static class MciAudioInfo
         {
             public static long GetDurationMs(string path)
             {
@@ -3870,7 +6077,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private class WaveInfo
+        internal class WaveInfo
         {
             public short AudioFormat;
             public short Channels;
@@ -3963,7 +6170,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private static class WaveformAnalyzer
+        internal static class WaveformAnalyzer
         {
             public static float[] BuildPeaks(string path, int desiredPeaks)
             {
@@ -4562,7 +6769,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private static class MediaFoundationAudio
+        internal static class MediaFoundationAudio
         {
             private const int MF_VERSION = 0x00020070;
             private const int MF_SOURCE_READERF_ENDOFSTREAM = 0x00000002;
@@ -4930,7 +7137,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private static class WavEditor
+        internal static class WavEditor
         {
             public static void ReverseFrames(string input, string output)
             {
@@ -5180,7 +7387,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private class SeekEventArgs : EventArgs
+        internal class SeekEventArgs : EventArgs
         {
             public long PositionMs;
 
@@ -5190,7 +7397,380 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private class WaveformView : Control
+        internal class SmoothTimeLabel : Label
+        {
+            public SmoothTimeLabel()
+            {
+                SetStyle(
+                    ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.UserPaint |
+                    ControlStyles.OptimizedDoubleBuffer |
+                    ControlStyles.ResizeRedraw |
+                    ControlStyles.Opaque,
+                    true
+                );
+
+                DoubleBuffered = true;
+                AutoSize = false;
+            }
+
+            protected override void OnPaintBackground(PaintEventArgs pevent)
+            {
+                // 不讓系統先清空背景，避免文字更新瞬間出現整塊閃爍。
+            }
+
+            protected override void OnTextChanged(EventArgs e)
+            {
+                // Label 原生文字更新容易先清除再重畫，改成由自繪流程一次畫完。
+                Invalidate(false);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.None;
+                e.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
+                e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                using (SolidBrush b = new SolidBrush(BackColor))
+                    e.Graphics.FillRectangle(b, ClientRectangle);
+
+                TextFormatFlags flags = TextFormatFlags.NoPadding |
+                                        TextFormatFlags.NoPrefix |
+                                        TextFormatFlags.EndEllipsis |
+                                        TextFormatFlags.VerticalCenter;
+
+                if (TextAlign == ContentAlignment.MiddleCenter ||
+                    TextAlign == ContentAlignment.TopCenter ||
+                    TextAlign == ContentAlignment.BottomCenter)
+                    flags |= TextFormatFlags.HorizontalCenter;
+                else if (TextAlign == ContentAlignment.MiddleRight ||
+                         TextAlign == ContentAlignment.TopRight ||
+                         TextAlign == ContentAlignment.BottomRight)
+                    flags |= TextFormatFlags.Right;
+                else
+                    flags |= TextFormatFlags.Left;
+
+                if (TextAlign == ContentAlignment.TopLeft ||
+                    TextAlign == ContentAlignment.TopCenter ||
+                    TextAlign == ContentAlignment.TopRight)
+                    flags &= ~TextFormatFlags.VerticalCenter;
+
+                TextRenderer.DrawText(
+                    e.Graphics,
+                    Text,
+                    Font,
+                    ClientRectangle,
+                    ForeColor,
+                    BackColor,
+                    flags
+                );
+            }
+        }
+
+        internal class PathDisplayPanel : Control
+        {
+            public override string Text
+            {
+                get { return base.Text; }
+                set
+                {
+                    string next = value ?? "";
+                    if (!string.Equals(base.Text, next, StringComparison.Ordinal))
+                    {
+                        base.Text = next;
+                        Invalidate();
+                    }
+                }
+            }
+
+            public PathDisplayPanel()
+            {
+                DoubleBuffered = true;
+                SetStyle(
+                    ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.UserPaint |
+                    ControlStyles.OptimizedDoubleBuffer |
+                    ControlStyles.ResizeRedraw,
+                    true
+                );
+
+                BackColor = AppColor.Card2;
+                ForeColor = AppColor.Text;
+                Cursor = Cursors.IBeam;
+                MinimumSize = new Size(160, 110);
+            }
+
+            public void Clear()
+            {
+                Text = "";
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                Rectangle rect = ClientRectangle;
+                rect.Inflate(-1, -1);
+
+                using (GraphicsPath path = Ui.RoundRect(rect, 18))
+                using (SolidBrush bg = new SolidBrush(AppColor.Card2))
+                using (Pen border = new Pen(Color.FromArgb(42, 42, 42), 1f))
+                {
+                    e.Graphics.FillPath(bg, path);
+                    e.Graphics.DrawPath(border, path);
+                }
+
+                Rectangle iconRect = new Rectangle(14, 16, 34, 34);
+                using (GraphicsPath iconPath = Ui.RoundRect(iconRect, 12))
+                using (LinearGradientBrush iconBrush = new LinearGradientBrush(iconRect, AppColor.Accent, AppColor.Accent2, 45f))
+                    e.Graphics.FillPath(iconBrush, iconPath);
+
+                using (Font iconFont = new Font("Microsoft JhengHei UI", 16F, FontStyle.Bold))
+                {
+                    TextRenderer.DrawText(
+                        e.Graphics,
+                        string.IsNullOrWhiteSpace(Text) ? "♪" : "⌁",
+                        iconFont,
+                        iconRect,
+                        Color.White,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
+                    );
+                }
+
+                string raw = Text ?? "";
+                bool empty = string.IsNullOrWhiteSpace(raw);
+                bool isUrl = raw.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || raw.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+
+                string title = empty ? "尚未選取檔案" : raw;
+                string sub = empty ? "選取歌曲或線上結果後，位置會顯示在這裡" : "";
+
+                if (!empty && !isUrl)
+                {
+                    try
+                    {
+                        title = Path.GetFileName(raw);
+                        sub = Path.GetDirectoryName(raw);
+                    }
+                    catch
+                    {
+                        title = raw;
+                    }
+                }
+                else if (!empty && isUrl)
+                {
+                    try
+                    {
+                        Uri uri = new Uri(raw);
+                        title = uri.Host.Replace("www.", "");
+                        sub = raw;
+                    }
+                    catch
+                    {
+                        title = "線上連結";
+                        sub = raw;
+                    }
+                }
+
+                Rectangle titleRect = new Rectangle(60, 14, Math.Max(10, Width - 78), 28);
+                Rectangle subRect = new Rectangle(16, 58, Math.Max(10, Width - 32), Math.Max(28, Height - 74));
+
+                using (Font titleFont = new Font("Microsoft JhengHei UI", 10F, FontStyle.Bold))
+                using (Font subFont = new Font("Microsoft JhengHei UI", 9F, FontStyle.Regular))
+                {
+                    TextRenderer.DrawText(
+                        e.Graphics,
+                        title,
+                        titleFont,
+                        titleRect,
+                        empty ? AppColor.SubText : AppColor.Text,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+                    );
+
+                    TextRenderer.DrawText(
+                        e.Graphics,
+                        string.IsNullOrWhiteSpace(sub) ? raw : sub,
+                        subFont,
+                        subRect,
+                        AppColor.SubText,
+                        TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis
+                    );
+                }
+            }
+        }
+
+        internal class RotatingDiscView : Control
+        {
+            public string TrackTitle = "MUSIC";
+            public bool IsPlaying = false;
+            public float Angle = 0f;
+
+            public RotatingDiscView()
+            {
+                DoubleBuffered = true;
+                SetStyle(
+                    ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.UserPaint |
+                    ControlStyles.OptimizedDoubleBuffer |
+                    ControlStyles.ResizeRedraw,
+                    true
+                );
+                BackColor = AppColor.Card2;
+                MinimumSize = new Size(180, 96);
+            }
+
+            public void Step()
+            {
+                if (!IsPlaying)
+                    return;
+
+                Angle += 5.5f;
+
+                if (Angle >= 360f)
+                    Angle -= 360f;
+
+                Invalidate();
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                Rectangle bg = ClientRectangle;
+                bg.Inflate(-1, -1);
+
+                using (GraphicsPath path = Ui.RoundRect(bg, 18))
+                using (SolidBrush brush = new SolidBrush(AppColor.Card2))
+                {
+                    e.Graphics.FillPath(brush, path);
+                }
+
+                int discSize = Math.Min(86, Math.Max(62, Math.Min(Height - 20, Width / 3)));
+                int discX = 18;
+                int discY = (Height - discSize) / 2;
+                Rectangle disc = new Rectangle(discX, discY, discSize, discSize);
+
+                using (GraphicsPath discPath = new GraphicsPath())
+                {
+                    discPath.AddEllipse(disc);
+
+                    using (PathGradientBrush pgb = new PathGradientBrush(discPath))
+                    {
+                        pgb.CenterColor = Color.FromArgb(70, 70, 70);
+                        pgb.SurroundColors = new Color[] { Color.FromArgb(8, 8, 8) };
+                        e.Graphics.FillEllipse(pgb, disc);
+                    }
+                }
+
+                using (Pen ring1 = new Pen(Color.FromArgb(70, 255, 255, 255), 1.2f))
+                using (Pen ring2 = new Pen(Color.FromArgb(60, AppColor.Accent), 1.6f))
+                using (Pen ring3 = new Pen(Color.FromArgb(45, AppColor.Accent2), 1.2f))
+                {
+                    Rectangle r1 = InflateRect(disc, -8);
+                    Rectangle r2 = InflateRect(disc, -20);
+                    Rectangle r3 = InflateRect(disc, -31);
+                    e.Graphics.DrawEllipse(ring1, r1);
+                    e.Graphics.DrawEllipse(ring2, r2);
+                    e.Graphics.DrawEllipse(ring3, r3);
+                }
+
+                PointF center = new PointF(disc.Left + disc.Width / 2f, disc.Top + disc.Height / 2f);
+
+                e.Graphics.TranslateTransform(center.X, center.Y);
+                e.Graphics.RotateTransform(Angle);
+
+                using (Pen shine = new Pen(Color.FromArgb(150, AppColor.Accent2), 4f))
+                using (Pen shine2 = new Pen(Color.FromArgb(90, Color.White), 2f))
+                {
+                    e.Graphics.DrawLine(shine, 0, -discSize / 2 + 8, 0, -discSize / 5);
+                    e.Graphics.DrawLine(shine2, -discSize / 4, discSize / 4, -discSize / 9, discSize / 9);
+                }
+
+                e.Graphics.ResetTransform();
+
+                int labelSize = Math.Max(22, discSize / 3);
+                Rectangle label = new Rectangle(
+                    (int)(center.X - labelSize / 2),
+                    (int)(center.Y - labelSize / 2),
+                    labelSize,
+                    labelSize
+                );
+
+                using (LinearGradientBrush labelBrush = new LinearGradientBrush(label, AppColor.Accent, AppColor.Accent2, 45f))
+                    e.Graphics.FillEllipse(labelBrush, label);
+
+                using (SolidBrush hole = new SolidBrush(AppColor.Card2))
+                {
+                    int holeSize = Math.Max(6, labelSize / 4);
+                    Rectangle holeRect = new Rectangle(
+                        (int)(center.X - holeSize / 2),
+                        (int)(center.Y - holeSize / 2),
+                        holeSize,
+                        holeSize
+                    );
+                    e.Graphics.FillEllipse(hole, holeRect);
+                }
+
+                int textX = disc.Right + 16;
+                Rectangle titleRect = new Rectangle(textX, 20, Math.Max(10, Width - textX - 14), 26);
+                Rectangle subRect = new Rectangle(textX, 47, Math.Max(10, Width - textX - 14), 22);
+
+                using (Font titleFont = new Font("Microsoft JhengHei UI", 10F, FontStyle.Bold))
+                using (Font subFont = new Font("Microsoft JhengHei UI", 8F, FontStyle.Regular))
+                {
+                    TextRenderer.DrawText(
+                        e.Graphics,
+                        string.IsNullOrWhiteSpace(TrackTitle) ? "MUSIC" : TrackTitle,
+                        titleFont,
+                        titleRect,
+                        AppColor.Text,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+                    );
+
+                    TextRenderer.DrawText(
+                        e.Graphics,
+                        IsPlaying ? "正在旋轉播放" : "等待播放",
+                        subFont,
+                        subRect,
+                        AppColor.SubText,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+                    );
+                }
+
+                DrawMiniBars(e.Graphics, new Rectangle(textX, Height - 26, Math.Max(20, Width - textX - 14), 12));
+            }
+
+            private void DrawMiniBars(Graphics g, Rectangle bounds)
+            {
+                int count = 16;
+                int gap = 4;
+                int barW = Math.Max(2, (bounds.Width - gap * (count - 1)) / count);
+
+                for (int i = 0; i < count; i++)
+                {
+                    double wave = Math.Sin((Angle / 18.0) + i * 0.75);
+                    int h = IsPlaying ? 4 + (int)((wave + 1.0) * 3.5) : 3;
+                    Rectangle r = new Rectangle(bounds.Left + i * (barW + gap), bounds.Bottom - h, barW, h);
+                    Color c = i % 2 == 0 ? AppColor.Accent : AppColor.Accent2;
+
+                    using (SolidBrush b = new SolidBrush(IsPlaying ? c : Color.FromArgb(75, 75, 75)))
+                        g.FillRectangle(b, r);
+                }
+            }
+
+            private static Rectangle InflateRect(Rectangle rect, int amount)
+            {
+                Rectangle copy = rect;
+                copy.Inflate(amount, amount);
+                return copy;
+            }
+        }
+
+        internal class WaveformView : Control
         {
             private float[] _peaks;
             private long _durationMs;
@@ -5314,7 +7894,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private class VisualizerView : Control
+        internal class VisualizerView : Control
         {
             private readonly Random _rng = new Random();
             private float _level;
@@ -5383,7 +7963,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private class MiniBarChart : Control
+        internal class MiniBarChart : Control
         {
             private Dictionary<string, int> _data = new Dictionary<string, int>();
             private string _title = "";
@@ -5480,7 +8060,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private class ModernButton : Button
+        internal class ModernButton : Button
         {
             public bool Primary = false;
             private bool _hover = false;
@@ -5564,7 +8144,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private class QuickCardPanel : Control
+        internal class QuickCardPanel : Control
         {
             public string Title = "";
             public string Subtitle = "";
@@ -5577,11 +8157,11 @@ namespace _1113354_陳冠瑋
             {
                 DoubleBuffered = true;
                 SetStyle(
-                    ControlStyles.SupportsTransparentBackColor |
-                    ControlStyles.AllPaintingInWmPaint |
-                    ControlStyles.UserPaint |
-                    ControlStyles.OptimizedDoubleBuffer |
-                    ControlStyles.ResizeRedraw,
+                    ControlStyles.SupportsTransparentBackColor | 
+                    ControlStyles.AllPaintingInWmPaint | 
+                    ControlStyles.UserPaint | 
+                    ControlStyles.OptimizedDoubleBuffer | 
+                    ControlStyles.ResizeRedraw, 
                     true
                 );
                 BackColor = Color.Transparent;
@@ -5639,7 +8219,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private class CardPanel : Panel
+        internal class CardPanel : Panel
         {
             public int Radius = 22;
 
@@ -5675,7 +8255,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private class GradientPanel : Panel
+        internal class GradientPanel : Panel
         {
             public Color Color1 = AppColor.Accent;
             public Color Color2 = AppColor.Accent2;
@@ -5710,7 +8290,307 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private static class Ui
+
+        internal enum ModernDialogIcon
+        {
+            Info,
+            Warning,
+            Error,
+            Question
+        }
+
+        internal class ModernDialog : Form
+        {
+            private readonly Panel _titleBar;
+            private readonly Label _titleLabel;
+            private readonly Label _messageLabel;
+            private readonly Label _iconCircle;
+            private readonly Button _closeButton;
+            private readonly Button _primaryButton;
+            private readonly Button _secondaryButton;
+            private bool _dragging;
+            private Point _dragStart;
+            private int _radius = 18;
+
+            public bool Result { get; private set; }
+
+            private ModernDialog(string title, string message, string primaryText, string secondaryText, ModernDialogIcon icon, bool showSecondary)
+            {
+                Result = false;
+                FormBorderStyle = FormBorderStyle.None;
+                StartPosition = FormStartPosition.CenterParent;
+                Size = new Size(460, 248);
+                MinimumSize = new Size(430, 220);
+                ShowInTaskbar = false;
+                KeyPreview = true;
+                BackColor = AppColor.Bg;
+                ForeColor = AppColor.Text;
+                Font = new Font("Microsoft JhengHei UI", 10F);
+                DoubleBuffered = true;
+
+                TableLayoutPanel root = new TableLayoutPanel();
+                root.Dock = DockStyle.Fill;
+                root.RowCount = 3;
+                root.ColumnCount = 1;
+                root.BackColor = AppColor.Card2;
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+                root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
+                Controls.Add(root);
+
+                _titleBar = new Panel();
+                _titleBar.Dock = DockStyle.Fill;
+                _titleBar.BackColor = AppColor.Card;
+                _titleBar.MouseDown += TitleArea_MouseDown;
+                _titleBar.MouseMove += TitleArea_MouseMove;
+                _titleBar.MouseUp += TitleArea_MouseUp;
+                root.Controls.Add(_titleBar, 0, 0);
+
+                _closeButton = new Button();
+                _closeButton.Text = "×";
+                _closeButton.Dock = DockStyle.Right;
+                _closeButton.Width = 48;
+                _closeButton.FlatStyle = FlatStyle.Flat;
+                _closeButton.FlatAppearance.BorderSize = 0;
+                _closeButton.BackColor = AppColor.Card;
+                _closeButton.ForeColor = AppColor.SubText;
+                _closeButton.Font = new Font("Microsoft JhengHei UI", 16F, FontStyle.Regular);
+                _closeButton.Cursor = Cursors.Hand;
+                _closeButton.Click += delegate
+                {
+                    Result = false;
+                    DialogResult = DialogResult.Cancel;
+                    Close();
+                };
+                _titleBar.Controls.Add(_closeButton);
+
+                _titleLabel = new Label();
+                _titleLabel.Text = title;
+                _titleLabel.Dock = DockStyle.Fill;
+                _titleLabel.Padding = new Padding(18, 0, 0, 0);
+                _titleLabel.ForeColor = AppColor.Text;
+                _titleLabel.BackColor = Color.Transparent;
+                _titleLabel.Font = new Font("Microsoft JhengHei UI", 11F, FontStyle.Bold);
+                _titleLabel.TextAlign = ContentAlignment.MiddleLeft;
+                _titleLabel.MouseDown += TitleArea_MouseDown;
+                _titleLabel.MouseMove += TitleArea_MouseMove;
+                _titleLabel.MouseUp += TitleArea_MouseUp;
+                _titleBar.Controls.Add(_titleLabel);
+
+                Panel body = new Panel();
+                body.Dock = DockStyle.Fill;
+                body.BackColor = AppColor.Card2;
+                body.Padding = new Padding(24, 20, 24, 16);
+                root.Controls.Add(body, 0, 1);
+
+                TableLayoutPanel bodyLayout = new TableLayoutPanel();
+                bodyLayout.Dock = DockStyle.Fill;
+                bodyLayout.RowCount = 1;
+                bodyLayout.ColumnCount = 2;
+                bodyLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78));
+                bodyLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+                body.Controls.Add(bodyLayout);
+
+                _iconCircle = new Label();
+                _iconCircle.Text = GetIconText(icon);
+                _iconCircle.Width = 54;
+                _iconCircle.Height = 54;
+                _iconCircle.Margin = new Padding(0, 10, 18, 0);
+                _iconCircle.TextAlign = ContentAlignment.MiddleCenter;
+                _iconCircle.ForeColor = Color.White;
+                _iconCircle.BackColor = Color.Transparent;
+                _iconCircle.Font = new Font("Segoe UI Symbol", 24F, FontStyle.Bold);
+                _iconCircle.Paint += delegate (object sender, PaintEventArgs e)
+                {
+                    e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                    using (SolidBrush b = new SolidBrush(GetIconColor(icon)))
+                        e.Graphics.FillEllipse(b, 0, 0, _iconCircle.Width - 1, _iconCircle.Height - 1);
+                    TextRenderer.DrawText(
+                        e.Graphics,
+                        _iconCircle.Text,
+                        _iconCircle.Font,
+                        _iconCircle.ClientRectangle,
+                        Color.White,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
+                    );
+                };
+                bodyLayout.Controls.Add(_iconCircle, 0, 0);
+
+                _messageLabel = new Label();
+                _messageLabel.Text = message;
+                _messageLabel.Dock = DockStyle.Fill;
+                _messageLabel.ForeColor = AppColor.Text;
+                _messageLabel.BackColor = Color.Transparent;
+                _messageLabel.Font = new Font("Microsoft JhengHei UI", 11F, FontStyle.Bold);
+                _messageLabel.TextAlign = ContentAlignment.MiddleLeft;
+                _messageLabel.AutoEllipsis = true;
+                bodyLayout.Controls.Add(_messageLabel, 1, 0);
+
+                FlowLayoutPanel buttonBar = new FlowLayoutPanel();
+                buttonBar.Dock = DockStyle.Fill;
+                buttonBar.FlowDirection = FlowDirection.RightToLeft;
+                buttonBar.WrapContents = false;
+                buttonBar.BackColor = AppColor.Card;
+                buttonBar.Padding = new Padding(18, 16, 18, 0);
+                root.Controls.Add(buttonBar, 0, 2);
+
+                _primaryButton = MakeDialogButton(primaryText, true);
+                _primaryButton.Click += delegate
+                {
+                    Result = true;
+                    DialogResult = DialogResult.OK;
+                    Close();
+                };
+
+                _secondaryButton = MakeDialogButton(secondaryText, false);
+                _secondaryButton.Click += delegate
+                {
+                    Result = false;
+                    DialogResult = DialogResult.Cancel;
+                    Close();
+                };
+
+                buttonBar.Controls.Add(_primaryButton);
+                if (showSecondary)
+                    buttonBar.Controls.Add(_secondaryButton);
+
+                Paint += ModernDialog_Paint;
+                Resize += delegate { ApplyRoundRegion(); };
+                Shown += delegate { ApplyRoundRegion(); };
+                KeyDown += ModernDialog_KeyDown;
+            }
+
+            private static Button MakeDialogButton(string text, bool primary)
+            {
+                Button btn = new Button();
+                btn.Text = text;
+                btn.Width = 128;
+                btn.Height = 38;
+                btn.Margin = new Padding(8, 0, 0, 0);
+                btn.FlatStyle = FlatStyle.Flat;
+                btn.FlatAppearance.BorderSize = 0;
+                btn.BackColor = primary ? AppColor.Accent : AppColor.Button;
+                btn.ForeColor = Color.White;
+                btn.Font = new Font("Microsoft JhengHei UI", 10F, FontStyle.Bold);
+                btn.Cursor = Cursors.Hand;
+                return btn;
+            }
+
+            private static string GetIconText(ModernDialogIcon icon)
+            {
+                if (icon == ModernDialogIcon.Error)
+                    return "×";
+                if (icon == ModernDialogIcon.Question)
+                    return "?";
+                if (icon == ModernDialogIcon.Warning)
+                    return "!";
+                return "i";
+            }
+
+            private static Color GetIconColor(ModernDialogIcon icon)
+            {
+                if (icon == ModernDialogIcon.Error)
+                    return Color.FromArgb(255, 87, 87);
+                if (icon == ModernDialogIcon.Question)
+                    return AppColor.Accent;
+                if (icon == ModernDialogIcon.Warning)
+                    return AppColor.Warning;
+                return Color.FromArgb(84, 170, 255);
+            }
+
+            private void ApplyRoundRegion()
+            {
+                try
+                {
+                    Rectangle rect = new Rectangle(0, 0, Width, Height);
+                    using (GraphicsPath path = Ui.RoundRect(rect, _radius))
+                        Region = new Region(path);
+                }
+                catch
+                {
+                }
+            }
+
+            private void ModernDialog_Paint(object sender, PaintEventArgs e)
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle rect = ClientRectangle;
+                rect.Width -= 1;
+                rect.Height -= 1;
+
+                using (GraphicsPath path = Ui.RoundRect(rect, _radius))
+                using (Pen pen = new Pen(Color.FromArgb(60, 60, 60)))
+                    e.Graphics.DrawPath(pen, path);
+            }
+
+            private void ModernDialog_KeyDown(object sender, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Escape)
+                {
+                    Result = false;
+                    DialogResult = DialogResult.Cancel;
+                    Close();
+                }
+                else if (e.KeyCode == Keys.Enter)
+                {
+                    Result = true;
+                    DialogResult = DialogResult.OK;
+                    Close();
+                }
+            }
+
+            private void TitleArea_MouseDown(object sender, MouseEventArgs e)
+            {
+                if (e.Button != MouseButtons.Left)
+                    return;
+
+                _dragging = true;
+                _dragStart = e.Location;
+            }
+
+            private void TitleArea_MouseMove(object sender, MouseEventArgs e)
+            {
+                if (!_dragging)
+                    return;
+
+                Point p = PointToScreen(e.Location);
+                Location = new Point(p.X - _dragStart.X, p.Y - _dragStart.Y);
+            }
+
+            private void TitleArea_MouseUp(object sender, MouseEventArgs e)
+            {
+                _dragging = false;
+            }
+
+            public static bool Confirm(IWin32Window owner, string title, string message, string primaryText, string secondaryText)
+            {
+                using (ModernDialog dialog = new ModernDialog(title, message, primaryText, secondaryText, ModernDialogIcon.Question, true))
+                {
+                    dialog.ShowDialog(owner);
+                    return dialog.Result;
+                }
+            }
+
+            public static void Info(IWin32Window owner, string title, string message)
+            {
+                using (ModernDialog dialog = new ModernDialog(title, message, "知道了", "", ModernDialogIcon.Info, false))
+                    dialog.ShowDialog(owner);
+            }
+
+            public static void Warning(IWin32Window owner, string title, string message)
+            {
+                using (ModernDialog dialog = new ModernDialog(title, message, "知道了", "", ModernDialogIcon.Warning, false))
+                    dialog.ShowDialog(owner);
+            }
+
+            public static void Error(IWin32Window owner, string title, string message)
+            {
+                using (ModernDialog dialog = new ModernDialog(title, message, "知道了", "", ModernDialogIcon.Error, false))
+                    dialog.ShowDialog(owner);
+            }
+        }
+
+        internal static class Ui
         {
             public static GraphicsPath RoundRect(Rectangle rect, int radius)
             {
@@ -5771,7 +8651,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private static class AppColor
+        internal static class AppColor
         {
             public static readonly Color Bg = Color.FromArgb(0, 0, 0);
             public static readonly Color Card = Color.FromArgb(18, 18, 18);
@@ -5791,7 +8671,7 @@ namespace _1113354_陳冠瑋
             public static readonly Color Button2 = Color.FromArgb(32, 32, 32);
             public static readonly Color Selected = Color.FromArgb(56, 56, 56);
             public static readonly Color Warning = Color.FromArgb(255, 205, 85);
-        }
-
     }
+}
+
 }
