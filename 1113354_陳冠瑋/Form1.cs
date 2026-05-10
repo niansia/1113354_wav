@@ -1,87 +1,126 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace _1113354_陳冠瑋
 {
     public partial class Form1 : Form
     {
-        // 使用 Windows 內建 MCI 播放 WAV，不用安裝 NuGet 套件
         [DllImport("winmm.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern int mciSendString(string command, StringBuilder buffer, int bufferSize, IntPtr hwndCallback);
 
         [DllImport("winmm.dll", CharSet = CharSet.Auto)]
         private static extern bool mciGetErrorString(int errorCode, StringBuilder errorText, int errorTextSize);
 
-        private const string Alias = "wavxplayer";
+        private const string MciAlias = "wav_player";
 
-        private readonly List<string> _playlist = new List<string>();
+        private readonly List<TrackItem> _tracks = new List<TrackItem>();
+        private readonly HashSet<string> _favoritePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Random _random = new Random();
+
+        private TrackItem _currentTrack;
+        private FileSystemWatcher _watcher;
 
         private bool _mciOpen = false;
         private bool _playRequested = false;
         private bool _isSeeking = false;
+        private bool _muted = false;
 
-        private int _currentIndex = -1;
         private long _durationMs = 0;
         private long _lastPositionMs = 0;
+        private long _loopA = -1;
+        private long _loopB = -1;
 
+        private int _volumeBeforeMute = 800;
+        private int _waveformLoadStamp = 0;
+
+        private TextBox mTxtSearch;
         private TextBox mTxtPath;
-        private ListBox mLstPlaylist;
 
-        private Button mBtnAddFiles;
-        private Button mBtnAddFolder;
-        private Button mBtnPlay;
-        private Button mBtnPause;
-        private Button mBtnStop;
-        private Button mBtnPrev;
-        private Button mBtnNext;
-        private Button mBtnRemove;
-        private Button mBtnClear;
-        private Button mBtnSaveList;
-        private Button mBtnLoadList;
-        private Button mBtnExit;
+        private ListView mList;
+
+        private Label mLblTitle;
+        private Label mLblSubtitle;
+        private Label mLblStats;
+        private Label mLblSelectedInfo;
+        private Label mLblNow;
+        private Label mLblTime;
+        private Label mLblStatus;
+        private Label mLblWatch;
+        private Label mLblVolume;
+        private Label mLblSpeed;
+        private Label mLblAB;
+
+        private ModernButton mBtnAddFiles;
+        private ModernButton mBtnAddFolder;
+        private ModernButton mBtnWatchFolder;
+        private ModernButton mBtnStopWatch;
+        private ModernButton mBtnCleanMissing;
+
+        private ModernButton mBtnPrev;
+        private ModernButton mBtnPlay;
+        private ModernButton mBtnPause;
+        private ModernButton mBtnStop;
+        private ModernButton mBtnNext;
+        private ModernButton mBtnMute;
+
+        private ModernButton mBtnRemove;
+        private ModernButton mBtnClear;
+        private ModernButton mBtnSaveList;
+        private ModernButton mBtnLoadList;
+
+        private ModernButton mBtnSetA;
+        private ModernButton mBtnSetB;
+        private ModernButton mBtnClearAB;
+
+        private CheckBox mChkShuffle;
+        private CheckBox mChkOnlyFavorite;
+        private ComboBox mCboLoop;
 
         private TrackBar mTrkProgress;
         private TrackBar mTrkVolume;
         private TrackBar mTrkSpeed;
 
-        private Label mLblNow;
-        private Label mLblTime;
-        private Label mLblInfo;
-        private Label mLblStatus;
-        private Label mLblVolume;
-        private Label mLblSpeed;
-
-        private CheckBox mChkShuffle;
-        private ComboBox mCboLoop;
+        private WaveformView mWaveform;
+        private VisualizerView mVisualizer;
 
         private Timer mTimer;
+
+        private ContextMenuStrip mMenu;
 
         public Form1()
         {
             InitializeComponent();
 
-            BuildModernUI();
-
             this.FormClosing -= Form1_FormClosing;
+
+            BuildProductUI();
+            LoadSession();
+
             this.FormClosing += Form1_FormClosing;
         }
 
-        private void BuildModernUI()
+        private void BuildProductUI()
         {
             SuspendLayout();
+
             Controls.Clear();
 
-            Text = "WAV 音效播放器 Pro Max";
-            Size = new Size(1000, 700);
-            MinimumSize = new Size(900, 580);
+            Text = "WAV播放器";
+            Size = new Size(1180, 760);
+            MinimumSize = new Size(1000, 650);
+            StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Microsoft JhengHei UI", 10F);
+            BackColor = AppColor.Bg;
+            ForeColor = AppColor.Text;
             KeyPreview = true;
             AllowDrop = true;
 
@@ -89,156 +128,282 @@ namespace _1113354_陳冠瑋
             DragDrop += Form1_DragDrop;
             KeyDown += Form1_KeyDown;
 
-            TableLayoutPanel main = new TableLayoutPanel();
-            main.Dock = DockStyle.Fill;
-            main.Padding = new Padding(14);
-            main.RowCount = 5;
-            main.ColumnCount = 1;
-            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
-            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 122));
-            main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 155));
-            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            TableLayoutPanel root = new TableLayoutPanel();
+            root.Dock = DockStyle.Fill;
+            root.Padding = new Padding(16);
+            root.BackColor = AppColor.Bg;
+            root.ColumnCount = 2;
+            root.RowCount = 4;
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 285));
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 105));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 225));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            Controls.Add(root);
 
-            Controls.Add(main);
+            GradientPanel header = new GradientPanel();
+            header.Dock = DockStyle.Fill;
+            header.Margin = new Padding(0, 0, 0, 14);
+            header.Radius = 22;
+            header.Color1 = Color.FromArgb(70, 95, 255);
+            header.Color2 = Color.FromArgb(120, 55, 210);
+            root.Controls.Add(header, 0, 0);
+            root.SetColumnSpan(header, 2);
 
-            GroupBox fileBox = new GroupBox();
-            fileBox.Text = "音效位置 / 匯入 WAV";
-            fileBox.Dock = DockStyle.Fill;
+            TableLayoutPanel headerLayout = new TableLayoutPanel();
+            headerLayout.Dock = DockStyle.Fill;
+            headerLayout.Padding = new Padding(26, 16, 26, 16);
+            headerLayout.ColumnCount = 2;
+            headerLayout.RowCount = 2;
+            headerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            headerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 240));
+            headerLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 60));
+            headerLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
+            header.Controls.Add(headerLayout);
 
-            TableLayoutPanel fileLayout = new TableLayoutPanel();
-            fileLayout.Dock = DockStyle.Fill;
-            fileLayout.Padding = new Padding(10);
-            fileLayout.ColumnCount = 4;
-            fileLayout.RowCount = 1;
-            fileLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            fileLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 115));
-            fileLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 115));
-            fileLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+            mLblTitle = MakeLabel("WAV播放器", 24, FontStyle.Bold, Color.White);
+            mLblTitle.Dock = DockStyle.Fill;
 
-            mTxtPath = new TextBox();
-            mTxtPath.Dock = DockStyle.Fill;
-            mTxtPath.ReadOnly = true;
-            mTxtPath.Margin = new Padding(4, 16, 8, 4);
+            mLblSubtitle = MakeLabel("播放清單｜波形圖｜A/B 循環｜音訊工具箱｜統計儀表板｜WAV 編輯工具", 10, FontStyle.Regular, Color.FromArgb(230, 235, 255));
+            mLblSubtitle.Dock = DockStyle.Fill;
 
-            mBtnAddFiles = MakeButton("加入檔案", 100);
-            mBtnAddFolder = MakeButton("加入資料夾", 100);
-            mBtnExit = MakeButton("結束", 75);
+            mLblStats = MakeLabel("0 首｜00:00｜收藏 0", 11, FontStyle.Bold, Color.White);
+            mLblStats.Dock = DockStyle.Fill;
+            mLblStats.TextAlign = ContentAlignment.MiddleRight;
+
+            Label hotkey = MakeLabel("Space 暫停/繼續　←/→ 快轉倒退　N 下一首　P 上一首", 9, FontStyle.Regular, Color.FromArgb(232, 236, 255));
+            hotkey.Dock = DockStyle.Fill;
+            hotkey.TextAlign = ContentAlignment.MiddleRight;
+
+            headerLayout.Controls.Add(mLblTitle, 0, 0);
+            headerLayout.Controls.Add(mLblSubtitle, 0, 1);
+            headerLayout.Controls.Add(mLblStats, 1, 0);
+            headerLayout.Controls.Add(hotkey, 1, 1);
+
+            CardPanel sideCard = new CardPanel();
+            sideCard.Dock = DockStyle.Fill;
+            sideCard.Margin = new Padding(0, 0, 14, 14);
+            root.Controls.Add(sideCard, 0, 1);
+
+            TableLayoutPanel side = new TableLayoutPanel();
+            side.Dock = DockStyle.Fill;
+            side.Padding = new Padding(16);
+            side.RowCount = 15;
+            side.ColumnCount = 1;
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 15));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 12));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            side.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            side.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            sideCard.Controls.Add(side);
+
+            Label sideTitle = MakeLabel("音樂庫", 14, FontStyle.Bold, AppColor.Text);
+            side.Controls.Add(sideTitle, 0, 0);
+
+            mBtnAddFiles = MakeButton("＋ 加入 WAV 檔案", true);
+            mBtnAddFolder = MakeButton("＋ 加入整個資料夾", false);
+            mBtnWatchFolder = MakeButton("◎ 監看資料夾", false);
+            mBtnStopWatch = MakeButton("停止監看", false);
+            mBtnCleanMissing = MakeButton("清除失效檔案", false);
 
             mBtnAddFiles.Click += delegate { AddFilesFromDialog(); };
             mBtnAddFolder.Click += delegate { AddFolderFromDialog(); };
-            mBtnExit.Click += delegate { Close(); };
+            mBtnWatchFolder.Click += delegate { ChooseWatchFolder(); };
+            mBtnStopWatch.Click += delegate { StopWatchingFolder(); };
+            mBtnCleanMissing.Click += delegate { CleanMissingFiles(); };
 
-            fileLayout.Controls.Add(mTxtPath, 0, 0);
-            fileLayout.Controls.Add(mBtnAddFiles, 1, 0);
-            fileLayout.Controls.Add(mBtnAddFolder, 2, 0);
-            fileLayout.Controls.Add(mBtnExit, 3, 0);
+            side.Controls.Add(mBtnAddFiles, 0, 1);
+            side.Controls.Add(mBtnAddFolder, 0, 2);
+            side.Controls.Add(mBtnWatchFolder, 0, 3);
+            side.Controls.Add(mBtnStopWatch, 0, 4);
+            side.Controls.Add(mBtnCleanMissing, 0, 5);
 
-            fileBox.Controls.Add(fileLayout);
-            main.Controls.Add(fileBox, 0, 0);
+            Label searchTitle = MakeLabel("搜尋 / 篩選", 12, FontStyle.Bold, AppColor.Text);
+            side.Controls.Add(searchTitle, 0, 7);
 
-            GroupBox controlBox = new GroupBox();
-            controlBox.Text = "播放控制";
-            controlBox.Dock = DockStyle.Fill;
+            mTxtSearch = new TextBox();
+            mTxtSearch.Dock = DockStyle.Fill;
+            mTxtSearch.BackColor = AppColor.Input;
+            mTxtSearch.ForeColor = AppColor.Text;
+            mTxtSearch.BorderStyle = BorderStyle.FixedSingle;
+            mTxtSearch.Margin = new Padding(0, 5, 0, 5);
+            mTxtSearch.TextChanged += delegate { RefreshList(); };
+            side.Controls.Add(mTxtSearch, 0, 8);
 
-            FlowLayoutPanel controlPanel = new FlowLayoutPanel();
-            controlPanel.Dock = DockStyle.Fill;
-            controlPanel.Padding = new Padding(12);
-            controlPanel.WrapContents = true;
-
-            mBtnPrev = MakeButton("⏮ 上一首", 100);
-            mBtnPlay = MakeButton("▶ 播放", 100);
-            mBtnPause = MakeButton("⏸ 暫停", 100);
-            mBtnStop = MakeButton("⏹ 停止", 100);
-            mBtnNext = MakeButton("⏭ 下一首", 100);
-            mBtnRemove = MakeButton("移除選取", 105);
-            mBtnClear = MakeButton("清空清單", 105);
-            mBtnSaveList = MakeButton("儲存清單", 105);
-            mBtnLoadList = MakeButton("載入清單", 105);
-
-            mChkShuffle = new CheckBox();
-            mChkShuffle.Text = "隨機播放";
-            mChkShuffle.AutoSize = true;
-            mChkShuffle.Margin = new Padding(12, 12, 6, 6);
-
-            Label loopLabel = new Label();
-            loopLabel.Text = "循環模式";
-            loopLabel.AutoSize = true;
-            loopLabel.Margin = new Padding(12, 14, 4, 4);
+            mChkOnlyFavorite = new CheckBox();
+            mChkOnlyFavorite.Text = "只顯示收藏";
+            mChkOnlyFavorite.ForeColor = AppColor.Text;
+            mChkOnlyFavorite.BackColor = Color.Transparent;
+            mChkOnlyFavorite.Dock = DockStyle.Fill;
+            mChkOnlyFavorite.CheckedChanged += delegate { RefreshList(); };
+            side.Controls.Add(mChkOnlyFavorite, 0, 9);
 
             mCboLoop = new ComboBox();
             mCboLoop.DropDownStyle = ComboBoxStyle.DropDownList;
-            mCboLoop.Width = 120;
-            mCboLoop.Margin = new Padding(4, 9, 6, 6);
+            mCboLoop.BackColor = AppColor.Input;
+            mCboLoop.ForeColor = AppColor.Text;
             mCboLoop.Items.Add("不循環");
             mCboLoop.Items.Add("單曲循環");
             mCboLoop.Items.Add("清單循環");
             mCboLoop.SelectedIndex = 0;
+            mCboLoop.Dock = DockStyle.Fill;
+            mCboLoop.Margin = new Padding(0, 5, 0, 5);
+            side.Controls.Add(mCboLoop, 0, 10);
 
-            mBtnPrev.Click += delegate { PlayPrevious(); };
-            mBtnPlay.Click += delegate { PlaySelectedOrCurrent(); };
-            mBtnPause.Click += delegate { TogglePause(); };
-            mBtnStop.Click += delegate { StopPlayback(); };
-            mBtnNext.Click += delegate { PlayNext(); };
+            mChkShuffle = new CheckBox();
+            mChkShuffle.Text = "隨機播放";
+            mChkShuffle.ForeColor = AppColor.Text;
+            mChkShuffle.BackColor = Color.Transparent;
+            mChkShuffle.Dock = DockStyle.Fill;
+            side.Controls.Add(mChkShuffle, 0, 12);
+
+            mLblWatch = MakeLabel("監看：未啟用", 9, FontStyle.Regular, AppColor.SubText);
+            mLblWatch.Dock = DockStyle.Fill;
+            mLblWatch.TextAlign = ContentAlignment.BottomLeft;
+            side.Controls.Add(mLblWatch, 0, 13);
+
+            mBtnLoadList = MakeButton("載入 M3U / TXT 清單", false);
+            mBtnLoadList.Click += delegate { LoadPlaylistFromDialog(); };
+            side.Controls.Add(mBtnLoadList, 0, 14);
+
+            CardPanel listCard = new CardPanel();
+            listCard.Dock = DockStyle.Fill;
+            listCard.Margin = new Padding(0, 0, 0, 14);
+            root.Controls.Add(listCard, 1, 1);
+
+            TableLayoutPanel listLayout = new TableLayoutPanel();
+            listLayout.Dock = DockStyle.Fill;
+            listLayout.Padding = new Padding(16);
+            listLayout.RowCount = 3;
+            listLayout.ColumnCount = 1;
+            listLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+            listLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            listLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+            listCard.Controls.Add(listLayout);
+
+            Label listTitle = MakeLabel("播放清單", 14, FontStyle.Bold, AppColor.Text);
+            listLayout.Controls.Add(listTitle, 0, 0);
+
+            mList = new ListView();
+            mList.Dock = DockStyle.Fill;
+            mList.View = View.Details;
+            mList.FullRowSelect = true;
+            mList.HideSelection = false;
+            mList.MultiSelect = false;
+            mList.BorderStyle = BorderStyle.None;
+            mList.BackColor = AppColor.Card2;
+            mList.ForeColor = AppColor.Text;
+            mList.OwnerDraw = true;
+            mList.Columns.Add("", 42);
+            mList.Columns.Add("檔名", 250);
+            mList.Columns.Add("長度", 80);
+            mList.Columns.Add("格式", 110);
+            mList.Columns.Add("取樣率", 90);
+            mList.Columns.Add("聲道", 70);
+            mList.Columns.Add("位元", 70);
+            mList.Columns.Add("大小", 85);
+            mList.Columns.Add("路徑", 420);
+            mList.DoubleClick += delegate { PlaySelectedOrCurrent(); };
+            mList.SelectedIndexChanged += delegate { UpdateSelectedInfo(); };
+            mList.DrawColumnHeader += List_DrawColumnHeader;
+            mList.DrawSubItem += List_DrawSubItem;
+            listLayout.Controls.Add(mList, 0, 1);
+
+            BuildContextMenu();
+
+            FlowLayoutPanel listButtons = new FlowLayoutPanel();
+            listButtons.Dock = DockStyle.Fill;
+            listButtons.Padding = new Padding(0, 10, 0, 0);
+            listButtons.WrapContents = false;
+
+            mBtnRemove = MakeButton("移除選取", false);
+            mBtnClear = MakeButton("清空清單", false);
+            mBtnSaveList = MakeButton("儲存 M3U", false);
+
+            ModernButton btnToolbox = MakeButton("音訊工具箱", false);
+            ModernButton btnDashboard = MakeButton("統計頁", false);
+
+            mBtnRemove.Width = 95;
+            mBtnClear.Width = 95;
+            mBtnSaveList.Width = 95;
+            btnToolbox.Width = 115;
+            btnDashboard.Width = 85;
+
             mBtnRemove.Click += delegate { RemoveSelected(); };
             mBtnClear.Click += delegate { ClearPlaylist(); };
             mBtnSaveList.Click += delegate { SavePlaylist(); };
-            mBtnLoadList.Click += delegate { LoadPlaylist(); };
+            btnToolbox.Click += delegate { ShowAudioToolboxPage(); };
+            btnDashboard.Click += delegate { ShowDashboardPage(); };
 
-            controlPanel.Controls.Add(mBtnPrev);
-            controlPanel.Controls.Add(mBtnPlay);
-            controlPanel.Controls.Add(mBtnPause);
-            controlPanel.Controls.Add(mBtnStop);
-            controlPanel.Controls.Add(mBtnNext);
-            controlPanel.Controls.Add(mBtnRemove);
-            controlPanel.Controls.Add(mBtnClear);
-            controlPanel.Controls.Add(mBtnSaveList);
-            controlPanel.Controls.Add(mBtnLoadList);
-            controlPanel.Controls.Add(mChkShuffle);
-            controlPanel.Controls.Add(loopLabel);
-            controlPanel.Controls.Add(mCboLoop);
+            listButtons.Controls.Add(mBtnRemove);
+            listButtons.Controls.Add(mBtnClear);
+            listButtons.Controls.Add(mBtnSaveList);
+            listButtons.Controls.Add(btnToolbox);
+            listButtons.Controls.Add(btnDashboard);
+            listLayout.Controls.Add(listButtons, 0, 2);
 
-            controlBox.Controls.Add(controlPanel);
-            main.Controls.Add(controlBox, 0, 1);
+            CardPanel playerCard = new CardPanel();
+            playerCard.Dock = DockStyle.Fill;
+            playerCard.Margin = new Padding(0, 0, 0, 8);
+            root.Controls.Add(playerCard, 0, 2);
+            root.SetColumnSpan(playerCard, 2);
 
-            GroupBox listBox = new GroupBox();
-            listBox.Text = "播放清單：可直接拖曳 WAV 檔或資料夾進來";
-            listBox.Dock = DockStyle.Fill;
+            TableLayoutPanel player = new TableLayoutPanel();
+            player.Dock = DockStyle.Fill;
+            player.Padding = new Padding(18);
+            player.ColumnCount = 3;
+            player.RowCount = 5;
+            player.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            player.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250));
+            player.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
+            player.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            player.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
+            player.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+            player.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+            player.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            playerCard.Controls.Add(player);
 
-            mLstPlaylist = new ListBox();
-            mLstPlaylist.Dock = DockStyle.Fill;
-            mLstPlaylist.HorizontalScrollbar = true;
-            mLstPlaylist.IntegralHeight = false;
-            mLstPlaylist.DoubleClick += delegate { PlaySelectedOrCurrent(); };
-            mLstPlaylist.SelectedIndexChanged += delegate { UpdateSelectedInfo(); };
-
-            listBox.Controls.Add(mLstPlaylist);
-            main.Controls.Add(listBox, 0, 2);
-
-            GroupBox nowBox = new GroupBox();
-            nowBox.Text = "播放狀態 / 進度 / 音量 / 倍速";
-            nowBox.Dock = DockStyle.Fill;
-
-            TableLayoutPanel nowLayout = new TableLayoutPanel();
-            nowLayout.Dock = DockStyle.Fill;
-            nowLayout.Padding = new Padding(10);
-            nowLayout.RowCount = 4;
-            nowLayout.ColumnCount = 1;
-            nowLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-            nowLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
-            nowLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-            nowLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-            mLblNow = new Label();
-            mLblNow.Text = "尚未播放";
+            mLblNow = MakeLabel("尚未播放", 13, FontStyle.Bold, AppColor.Text);
             mLblNow.Dock = DockStyle.Fill;
-            mLblNow.TextAlign = ContentAlignment.MiddleLeft;
+            player.Controls.Add(mLblNow, 0, 0);
+            player.SetColumnSpan(mLblNow, 3);
+
+            mWaveform = new WaveformView();
+            mWaveform.Dock = DockStyle.Fill;
+            mWaveform.Margin = new Padding(0, 4, 16, 0);
+            mWaveform.SeekRequested += delegate (object sender, SeekEventArgs e)
+            {
+                SeekTo(e.PositionMs);
+            };
+            player.Controls.Add(mWaveform, 0, 1);
+
+            mVisualizer = new VisualizerView();
+            mVisualizer.Dock = DockStyle.Fill;
+            mVisualizer.Margin = new Padding(0, 4, 16, 0);
+            player.Controls.Add(mVisualizer, 1, 1);
+
+            mLblSelectedInfo = MakeLabel("WAV 資訊：尚未選取檔案", 9, FontStyle.Regular, AppColor.SubText);
+            mLblSelectedInfo.Dock = DockStyle.Fill;
+            mLblSelectedInfo.TextAlign = ContentAlignment.MiddleLeft;
+            player.Controls.Add(mLblSelectedInfo, 2, 1);
 
             mTrkProgress = new TrackBar();
             mTrkProgress.Dock = DockStyle.Fill;
             mTrkProgress.Minimum = 0;
             mTrkProgress.Maximum = 10000;
             mTrkProgress.TickFrequency = 1000;
+            mTrkProgress.BackColor = AppColor.Card;
             mTrkProgress.MouseDown += delegate { _isSeeking = true; };
             mTrkProgress.MouseUp += delegate
             {
@@ -254,94 +419,199 @@ namespace _1113354_陳冠瑋
                     UpdateTimeDisplay(preview, _durationMs);
                 }
             };
+            player.Controls.Add(mTrkProgress, 0, 2);
+            player.SetColumnSpan(mTrkProgress, 2);
 
-            mLblTime = new Label();
-            mLblTime.Text = "00:00 / 00:00";
+            mLblTime = MakeLabel("00:00 / 00:00", 10, FontStyle.Bold, AppColor.Text);
             mLblTime.Dock = DockStyle.Fill;
-            mLblTime.TextAlign = ContentAlignment.MiddleLeft;
+            mLblTime.TextAlign = ContentAlignment.MiddleRight;
+            player.Controls.Add(mLblTime, 2, 2);
 
-            FlowLayoutPanel optionPanel = new FlowLayoutPanel();
-            optionPanel.Dock = DockStyle.Fill;
-            optionPanel.WrapContents = false;
+            FlowLayoutPanel controlBar = new FlowLayoutPanel();
+            controlBar.Dock = DockStyle.Fill;
+            controlBar.WrapContents = false;
+            controlBar.Padding = new Padding(0, 2, 0, 0);
 
-            mLblVolume = new Label();
-            mLblVolume.Text = "音量 80%";
-            mLblVolume.Width = 85;
+            mBtnPrev = MakeButton("⏮", false);
+            mBtnPlay = MakeButton("▶ 播放", true);
+            mBtnPause = MakeButton("⏸", false);
+            mBtnStop = MakeButton("⏹", false);
+            mBtnNext = MakeButton("⏭", false);
+            mBtnMute = MakeButton("🔊", false);
+
+            mBtnPrev.Width = 58;
+            mBtnPlay.Width = 105;
+            mBtnPause.Width = 58;
+            mBtnStop.Width = 58;
+            mBtnNext.Width = 58;
+            mBtnMute.Width = 58;
+
+            mBtnPrev.Click += delegate { PlayPrevious(); };
+            mBtnPlay.Click += delegate { PlaySelectedOrCurrent(); };
+            mBtnPause.Click += delegate { TogglePause(); };
+            mBtnStop.Click += delegate { StopPlayback(); };
+            mBtnNext.Click += delegate { PlayNext(); };
+            mBtnMute.Click += delegate { ToggleMute(); };
+
+            controlBar.Controls.Add(mBtnPrev);
+            controlBar.Controls.Add(mBtnPlay);
+            controlBar.Controls.Add(mBtnPause);
+            controlBar.Controls.Add(mBtnStop);
+            controlBar.Controls.Add(mBtnNext);
+            controlBar.Controls.Add(mBtnMute);
+
+            player.Controls.Add(controlBar, 0, 3);
+
+            FlowLayoutPanel abBar = new FlowLayoutPanel();
+            abBar.Dock = DockStyle.Fill;
+            abBar.WrapContents = false;
+            abBar.Padding = new Padding(0, 2, 0, 0);
+
+            mBtnSetA = MakeButton("設 A 點", false);
+            mBtnSetB = MakeButton("設 B 點", false);
+            mBtnClearAB = MakeButton("清除 AB", false);
+            mBtnSetA.Width = 82;
+            mBtnSetB.Width = 82;
+            mBtnClearAB.Width = 90;
+
+            mBtnSetA.Click += delegate { SetLoopA(); };
+            mBtnSetB.Click += delegate { SetLoopB(); };
+            mBtnClearAB.Click += delegate { ClearABLoop(); };
+
+            mLblAB = MakeLabel("AB：未設定", 9, FontStyle.Regular, AppColor.SubText);
+            mLblAB.Width = 250;
+            mLblAB.TextAlign = ContentAlignment.MiddleLeft;
+
+            abBar.Controls.Add(mBtnSetA);
+            abBar.Controls.Add(mBtnSetB);
+            abBar.Controls.Add(mBtnClearAB);
+            abBar.Controls.Add(mLblAB);
+            player.Controls.Add(abBar, 1, 3);
+            player.SetColumnSpan(abBar, 2);
+
+            FlowLayoutPanel sliders = new FlowLayoutPanel();
+            sliders.Dock = DockStyle.Fill;
+            sliders.WrapContents = false;
+            sliders.Padding = new Padding(0, 4, 0, 0);
+
+            mLblVolume = MakeLabel("音量 80%", 9, FontStyle.Regular, AppColor.SubText);
+            mLblVolume.Width = 78;
             mLblVolume.TextAlign = ContentAlignment.MiddleLeft;
-            mLblVolume.Margin = new Padding(4, 12, 4, 4);
 
             mTrkVolume = new TrackBar();
             mTrkVolume.Minimum = 0;
             mTrkVolume.Maximum = 1000;
             mTrkVolume.Value = 800;
-            mTrkVolume.Width = 180;
+            mTrkVolume.Width = 170;
             mTrkVolume.TickFrequency = 100;
+            mTrkVolume.BackColor = AppColor.Card;
             mTrkVolume.ValueChanged += delegate
             {
                 mLblVolume.Text = "音量 " + (mTrkVolume.Value / 10) + "%";
-                ApplyVolume();
+                if (!_muted)
+                    ApplyVolume();
             };
 
-            mLblSpeed = new Label();
-            mLblSpeed.Text = "倍速 100%";
-            mLblSpeed.Width = 95;
+            mLblSpeed = MakeLabel("倍速 100%", 9, FontStyle.Regular, AppColor.SubText);
+            mLblSpeed.Width = 88;
             mLblSpeed.TextAlign = ContentAlignment.MiddleLeft;
-            mLblSpeed.Margin = new Padding(20, 12, 4, 4);
+            mLblSpeed.Margin = new Padding(20, 0, 0, 0);
 
             mTrkSpeed = new TrackBar();
             mTrkSpeed.Minimum = 50;
             mTrkSpeed.Maximum = 200;
             mTrkSpeed.Value = 100;
-            mTrkSpeed.Width = 200;
+            mTrkSpeed.Width = 190;
             mTrkSpeed.TickFrequency = 25;
+            mTrkSpeed.BackColor = AppColor.Card;
             mTrkSpeed.ValueChanged += delegate
             {
                 mLblSpeed.Text = "倍速 " + mTrkSpeed.Value + "%";
                 ApplySpeed();
             };
 
-            mLblInfo = new Label();
-            mLblInfo.Text = "WAV 資訊：尚未選取檔案";
-            mLblInfo.AutoSize = true;
-            mLblInfo.Margin = new Padding(20, 13, 4, 4);
+            mTxtPath = new TextBox();
+            mTxtPath.ReadOnly = true;
+            mTxtPath.BorderStyle = BorderStyle.FixedSingle;
+            mTxtPath.BackColor = AppColor.Input;
+            mTxtPath.ForeColor = AppColor.SubText;
+            mTxtPath.Width = 455;
+            mTxtPath.Margin = new Padding(20, 5, 0, 0);
 
-            optionPanel.Controls.Add(mLblVolume);
-            optionPanel.Controls.Add(mTrkVolume);
-            optionPanel.Controls.Add(mLblSpeed);
-            optionPanel.Controls.Add(mTrkSpeed);
-            optionPanel.Controls.Add(mLblInfo);
+            sliders.Controls.Add(mLblVolume);
+            sliders.Controls.Add(mTrkVolume);
+            sliders.Controls.Add(mLblSpeed);
+            sliders.Controls.Add(mTrkSpeed);
+            sliders.Controls.Add(mTxtPath);
 
-            nowLayout.Controls.Add(mLblNow, 0, 0);
-            nowLayout.Controls.Add(mTrkProgress, 0, 1);
-            nowLayout.Controls.Add(mLblTime, 0, 2);
-            nowLayout.Controls.Add(optionPanel, 0, 3);
+            player.Controls.Add(sliders, 0, 4);
+            player.SetColumnSpan(sliders, 3);
 
-            nowBox.Controls.Add(nowLayout);
-            main.Controls.Add(nowBox, 0, 3);
-
-            mLblStatus = new Label();
+            mLblStatus = MakeLabel("就緒。可拖曳 WAV 檔或資料夾進來。", 9, FontStyle.Regular, AppColor.SubText);
             mLblStatus.Dock = DockStyle.Fill;
             mLblStatus.TextAlign = ContentAlignment.MiddleLeft;
-            mLblStatus.Text = "提示：Space 暫停/繼續，←/→ 倒退/快轉 5 秒，N 下一首，P 上一首，Delete 移除選取。";
-            main.Controls.Add(mLblStatus, 0, 4);
+            root.Controls.Add(mLblStatus, 0, 3);
+            root.SetColumnSpan(mLblStatus, 2);
 
             mTimer = new Timer();
-            mTimer.Interval = 200;
+            mTimer.Interval = 160;
             mTimer.Tick += UiTimer_Tick;
             mTimer.Start();
 
             ResumeLayout();
         }
 
-        private Button MakeButton(string text, int width)
+        private ModernButton MakeButton(string text, bool primary)
         {
-            Button btn = new Button();
+            ModernButton btn = new ModernButton();
             btn.Text = text;
-            btn.Width = width;
-            btn.Height = 36;
-            btn.Margin = new Padding(6);
-            btn.FlatStyle = FlatStyle.System;
+            btn.Width = 145;
+            btn.Height = 34;
+            btn.Margin = new Padding(0, 4, 8, 4);
+            btn.Primary = primary;
+            btn.Font = new Font("Microsoft JhengHei UI", 9F, FontStyle.Bold);
             return btn;
+        }
+
+        private Label MakeLabel(string text, float size, FontStyle style, Color color)
+        {
+            Label label = new Label();
+            label.Text = text;
+            label.ForeColor = color;
+            label.BackColor = Color.Transparent;
+            label.Font = new Font("Microsoft JhengHei UI", size, style);
+            label.AutoEllipsis = true;
+            return label;
+        }
+
+        private void BuildContextMenu()
+        {
+            mMenu = new ContextMenuStrip();
+            mMenu.BackColor = AppColor.Card2;
+            mMenu.ForeColor = AppColor.Text;
+            mMenu.RenderMode = ToolStripRenderMode.System;
+
+            ToolStripMenuItem play = new ToolStripMenuItem("播放");
+            ToolStripMenuItem fav = new ToolStripMenuItem("切換收藏");
+            ToolStripMenuItem openFolder = new ToolStripMenuItem("在檔案總管中顯示");
+            ToolStripMenuItem copyPath = new ToolStripMenuItem("複製路徑");
+            ToolStripMenuItem remove = new ToolStripMenuItem("移除");
+
+            play.Click += delegate { PlaySelectedOrCurrent(); };
+            fav.Click += delegate { ToggleSelectedFavorite(); };
+            openFolder.Click += delegate { OpenSelectedInExplorer(); };
+            copyPath.Click += delegate { CopySelectedPath(); };
+            remove.Click += delegate { RemoveSelected(); };
+
+            mMenu.Items.Add(play);
+            mMenu.Items.Add(fav);
+            mMenu.Items.Add(new ToolStripSeparator());
+            mMenu.Items.Add(openFolder);
+            mMenu.Items.Add(copyPath);
+            mMenu.Items.Add(new ToolStripSeparator());
+            mMenu.Items.Add(remove);
+
+            mList.ContextMenuStrip = mMenu;
         }
 
         private void AddFilesFromDialog()
@@ -353,9 +623,7 @@ namespace _1113354_陳冠瑋
                 ofd.Multiselect = true;
 
                 if (ofd.ShowDialog() == DialogResult.OK)
-                {
-                    AddFilesToPlaylist(ofd.FileNames);
-                }
+                    AddFilesToPlaylist(ofd.FileNames, true);
             }
         }
 
@@ -366,57 +634,80 @@ namespace _1113354_陳冠瑋
                 fbd.Description = "選擇包含 WAV 的資料夾，會自動掃描子資料夾";
 
                 if (fbd.ShowDialog() == DialogResult.OK)
-                {
-                    AddFilesToPlaylist(new string[] { fbd.SelectedPath });
-                }
+                    AddFilesToPlaylist(new string[] { fbd.SelectedPath }, true);
             }
         }
 
-        private int AddFilesToPlaylist(IEnumerable<string> paths)
+        private void AddFilesToPlaylist(IEnumerable<string> paths, bool showMessage)
         {
             int added = 0;
+            int skipped = 0;
 
-            foreach (string rawPath in paths)
+            List<string> expanded = new List<string>();
+
+            foreach (string raw in paths)
+            {
+                if (string.IsNullOrWhiteSpace(raw))
+                    continue;
+
+                if (Directory.Exists(raw))
+                    expanded.AddRange(SafeEnumerateWavFiles(raw));
+                else
+                    expanded.Add(raw);
+            }
+
+            foreach (string rawPath in expanded)
             {
                 if (string.IsNullOrWhiteSpace(rawPath))
                     continue;
 
-                if (Directory.Exists(rawPath))
+                if (!File.Exists(rawPath))
                 {
-                    added += AddFilesToPlaylist(SafeEnumerateWavFiles(rawPath));
+                    skipped++;
                     continue;
                 }
 
-                if (!File.Exists(rawPath))
-                    continue;
-
                 if (!string.Equals(Path.GetExtension(rawPath), ".wav", StringComparison.OrdinalIgnoreCase))
+                {
+                    skipped++;
                     continue;
+                }
 
-                string fullPath = Path.GetFullPath(rawPath);
+                string full = Path.GetFullPath(rawPath);
 
-                if (PlaylistContains(fullPath))
+                if (_tracks.Any(t => string.Equals(t.Path, full, StringComparison.OrdinalIgnoreCase)))
+                {
+                    skipped++;
                     continue;
+                }
 
-                _playlist.Add(fullPath);
-                mLstPlaylist.Items.Add(GetPlaylistCaption(fullPath));
-                added++;
+                try
+                {
+                    TrackItem item = TrackItem.FromFile(full);
+                    item.IsFavorite = _favoritePaths.Contains(full);
+                    _tracks.Add(item);
+                    added++;
+                }
+                catch
+                {
+                    skipped++;
+                }
             }
 
-            if (_currentIndex < 0 && _playlist.Count > 0)
-            {
-                _currentIndex = 0;
-                mLstPlaylist.SelectedIndex = 0;
-            }
+            RefreshList();
+            UpdateStats();
 
-            SetStatus("已加入 " + added + " 個 WAV 檔案。");
-            return added;
+            if (_tracks.Count > 0 && mList.SelectedItems.Count == 0)
+                SelectTrack(_tracks[0]);
+
+            if (showMessage)
+                SetStatus("已加入 " + added + " 個 WAV 檔案，略過 " + skipped + " 個項目。");
         }
 
         private IEnumerable<string> SafeEnumerateWavFiles(string folder)
         {
             string[] files = new string[0];
-            string[] folders = new string[0];
+            string[] dirs = new string[0];
 
             try
             {
@@ -431,71 +722,130 @@ namespace _1113354_陳冠瑋
 
             try
             {
-                folders = Directory.GetDirectories(folder);
+                dirs = Directory.GetDirectories(folder);
             }
             catch
             {
             }
 
-            foreach (string subFolder in folders)
+            foreach (string dir in dirs)
             {
-                foreach (string file in SafeEnumerateWavFiles(subFolder))
+                foreach (string file in SafeEnumerateWavFiles(dir))
                     yield return file;
             }
         }
 
-        private bool PlaylistContains(string path)
+        private void RefreshList()
         {
-            string full = Path.GetFullPath(path);
+            if (mList == null)
+                return;
 
-            foreach (string item in _playlist)
+            TrackItem selected = GetSelectedTrack();
+
+            mList.BeginUpdate();
+            mList.Items.Clear();
+
+            string keyword = mTxtSearch == null ? "" : mTxtSearch.Text.Trim();
+
+            foreach (TrackItem track in _tracks)
             {
-                if (string.Equals(Path.GetFullPath(item), full, StringComparison.OrdinalIgnoreCase))
-                    return true;
+                if (mChkOnlyFavorite != null && mChkOnlyFavorite.Checked && !track.IsFavorite)
+                    continue;
+
+                if (keyword.Length > 0)
+                {
+                    string hay = track.FileName + " " + track.Path + " " + track.FormatName;
+                    if (hay.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
+                }
+
+                string flag = "";
+
+                if (_currentTrack != null && string.Equals(_currentTrack.Path, track.Path, StringComparison.OrdinalIgnoreCase))
+                    flag = "▶";
+                else if (track.IsFavorite)
+                    flag = "★";
+
+                ListViewItem item = new ListViewItem(flag);
+                item.Tag = track;
+                item.SubItems.Add(track.FileName);
+                item.SubItems.Add(FormatTime(track.DurationMs));
+                item.SubItems.Add(track.FormatName);
+                item.SubItems.Add(track.SampleRate + " Hz");
+                item.SubItems.Add(track.Channels.ToString());
+                item.SubItems.Add(track.BitsPerSample + " bit");
+                item.SubItems.Add(FormatBytes(track.FileSize));
+                item.SubItems.Add(track.Path);
+
+                mList.Items.Add(item);
+
+                if (selected != null && string.Equals(selected.Path, track.Path, StringComparison.OrdinalIgnoreCase))
+                    item.Selected = true;
             }
 
-            return false;
+            mList.EndUpdate();
         }
 
-        private string GetPlaylistCaption(string path)
+        private void SelectTrack(TrackItem track)
         {
-            try
+            if (track == null)
+                return;
+
+            foreach (ListViewItem item in mList.Items)
             {
-                WaveInfo info = WaveInfo.Read(path);
-                return Path.GetFileName(path) + "    [" + FormatTime(info.DurationMs) + "]    " + info.ShortDescription;
+                TrackItem t = item.Tag as TrackItem;
+
+                if (t != null && string.Equals(t.Path, track.Path, StringComparison.OrdinalIgnoreCase))
+                {
+                    item.Selected = true;
+                    item.Focused = true;
+                    item.EnsureVisible();
+                    break;
+                }
             }
-            catch
-            {
-                return Path.GetFileName(path);
-            }
+        }
+
+        private TrackItem GetSelectedTrack()
+        {
+            if (mList == null || mList.SelectedItems.Count == 0)
+                return null;
+
+            return mList.SelectedItems[0].Tag as TrackItem;
         }
 
         private void PlaySelectedOrCurrent()
         {
-            if (_playlist.Count == 0)
+            TrackItem selected = GetSelectedTrack();
+
+            if (selected != null)
             {
-                SetStatus("請先加入 WAV 檔案。");
+                PlayTrack(selected);
                 return;
             }
 
-            int index = mLstPlaylist.SelectedIndex;
+            if (_currentTrack != null)
+            {
+                PlayTrack(_currentTrack);
+                return;
+            }
 
-            if (index < 0)
-                index = _currentIndex >= 0 ? _currentIndex : 0;
+            if (_tracks.Count > 0)
+            {
+                PlayTrack(_tracks[0]);
+                return;
+            }
 
-            PlayIndex(index);
+            SetStatus("請先加入 WAV 檔案。");
         }
 
-        private void PlayIndex(int index)
+        private void PlayTrack(TrackItem track)
         {
-            if (index < 0 || index >= _playlist.Count)
+            if (track == null)
                 return;
 
-            string path = _playlist[index];
-
-            if (!File.Exists(path))
+            if (!File.Exists(track.Path))
             {
-                MessageBox.Show("找不到檔案：\n" + path, "檔案不存在", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("找不到檔案：\n" + track.Path, "檔案不存在", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -503,47 +853,40 @@ namespace _1113354_陳冠瑋
             {
                 CloseMci();
 
-                bool opened = RunMci("open " + Quote(path) + " type waveaudio alias " + Alias, false);
+                bool opened = RunMci("open " + Quote(track.Path) + " type waveaudio alias " + MciAlias, false);
 
                 if (!opened)
-                    RunMci("open " + Quote(path) + " alias " + Alias, true);
+                    RunMci("open " + Quote(track.Path) + " alias " + MciAlias, true);
 
                 _mciOpen = true;
 
-                RunMci("set " + Alias + " time format milliseconds", false);
+                RunMci("set " + MciAlias + " time format milliseconds", false);
 
-                _durationMs = GetLengthSafe();
-
-                if (_durationMs <= 0)
-                {
-                    try
-                    {
-                        _durationMs = WaveInfo.Read(path).DurationMs;
-                    }
-                    catch
-                    {
-                        _durationMs = 0;
-                    }
-                }
+                long mciLength = GetLengthSafe();
+                _durationMs = mciLength > 0 ? mciLength : track.DurationMs;
 
                 ApplyVolume();
                 ApplySpeed();
 
-                RunMci("play " + Alias, true);
+                RunMci("play " + MciAlias, true);
 
-                _currentIndex = index;
+                _currentTrack = track;
                 _playRequested = true;
                 _lastPositionMs = 0;
+                _loopA = -1;
+                _loopB = -1;
 
-                if (mLstPlaylist.SelectedIndex != index)
-                    mLstPlaylist.SelectedIndex = index;
-
-                mTxtPath.Text = path;
-                mLblNow.Text = "正在播放：" + Path.GetFileName(path);
-                mBtnPause.Text = "⏸ 暫停";
+                mTxtPath.Text = track.Path;
+                mLblNow.Text = "正在播放：" + track.FileName;
+                mBtnPlay.Text = "▶ 播放";
+                mBtnPause.Text = "⏸";
+                mLblAB.Text = "AB：未設定";
 
                 UpdateTimeDisplay(0, _durationMs);
-                SetStatus("播放中：" + Path.GetFileName(path));
+                SelectTrack(track);
+                RefreshList();
+                LoadWaveformAsync(track);
+                SetStatus("播放中：" + track.FileName);
             }
             catch (Exception ex)
             {
@@ -564,27 +907,20 @@ namespace _1113354_陳冠瑋
 
             if (mode == "playing")
             {
-                RunMci("pause " + Alias, false);
+                RunMci("pause " + MciAlias, false);
                 _playRequested = false;
-                mBtnPause.Text = "▶ 繼續";
+                mBtnPause.Text = "▶";
                 SetStatus("已暫停。");
-            }
-            else if (mode == "paused")
-            {
-                bool ok = RunMci("resume " + Alias, false);
-
-                if (!ok)
-                    RunMci("play " + Alias, false);
-
-                _playRequested = true;
-                mBtnPause.Text = "⏸ 暫停";
-                SetStatus("繼續播放。");
             }
             else
             {
-                RunMci("play " + Alias, false);
+                bool ok = RunMci("resume " + MciAlias, false);
+
+                if (!ok)
+                    RunMci("play " + MciAlias, false);
+
                 _playRequested = true;
-                mBtnPause.Text = "⏸ 暫停";
+                mBtnPause.Text = "⏸";
                 SetStatus("繼續播放。");
             }
         }
@@ -593,16 +929,21 @@ namespace _1113354_陳冠瑋
         {
             if (_mciOpen)
             {
-                RunMci("stop " + Alias, false);
-                RunMci("seek " + Alias + " to start", false);
+                RunMci("stop " + MciAlias, false);
+                RunMci("seek " + MciAlias + " to start", false);
             }
 
             _playRequested = false;
             _lastPositionMs = 0;
-            mBtnPause.Text = "⏸ 暫停";
 
             if (mTrkProgress != null)
                 mTrkProgress.Value = 0;
+
+            if (mWaveform != null)
+                mWaveform.PositionMs = 0;
+
+            if (mVisualizer != null)
+                mVisualizer.Level = 0;
 
             UpdateTimeDisplay(0, _durationMs);
             SetStatus("已停止。");
@@ -610,17 +951,17 @@ namespace _1113354_陳冠瑋
 
         private void PlayNext()
         {
-            int next;
+            TrackItem next = GetNextTrack();
 
-            if (TryGetNextIndex(out next))
-                PlayIndex(next);
+            if (next != null)
+                PlayTrack(next);
             else
                 SetStatus("已經是最後一首。");
         }
 
         private void PlayPrevious()
         {
-            if (_playlist.Count == 0)
+            if (_tracks.Count == 0)
                 return;
 
             long pos = GetPositionSafe();
@@ -631,12 +972,13 @@ namespace _1113354_陳冠瑋
                 return;
             }
 
-            int prev = _currentIndex - 1;
+            int index = _currentTrack == null ? -1 : _tracks.IndexOf(_currentTrack);
+            int prevIndex = index - 1;
 
-            if (prev < 0)
+            if (prevIndex < 0)
             {
                 if (GetLoopMode() == 2)
-                    prev = _playlist.Count - 1;
+                    prevIndex = _tracks.Count - 1;
                 else
                 {
                     SetStatus("已經是第一首。");
@@ -644,42 +986,37 @@ namespace _1113354_陳冠瑋
                 }
             }
 
-            PlayIndex(prev);
+            PlayTrack(_tracks[prevIndex]);
         }
 
-        private bool TryGetNextIndex(out int next)
+        private TrackItem GetNextTrack()
         {
-            next = -1;
+            if (_tracks.Count == 0)
+                return null;
 
-            if (_playlist.Count == 0)
-                return false;
-
-            if (mChkShuffle.Checked && _playlist.Count > 1)
+            if (mChkShuffle != null && mChkShuffle.Checked && _tracks.Count > 1)
             {
+                TrackItem picked;
+
                 do
                 {
-                    next = _random.Next(_playlist.Count);
+                    picked = _tracks[_random.Next(_tracks.Count)];
                 }
-                while (next == _currentIndex);
+                while (_currentTrack != null && string.Equals(picked.Path, _currentTrack.Path, StringComparison.OrdinalIgnoreCase));
 
-                return true;
+                return picked;
             }
 
-            int candidate = _currentIndex + 1;
+            int index = _currentTrack == null ? -1 : _tracks.IndexOf(_currentTrack);
+            int nextIndex = index + 1;
 
-            if (candidate < _playlist.Count)
-            {
-                next = candidate;
-                return true;
-            }
+            if (nextIndex >= 0 && nextIndex < _tracks.Count)
+                return _tracks[nextIndex];
 
             if (GetLoopMode() == 2)
-            {
-                next = 0;
-                return true;
-            }
+                return _tracks[0];
 
-            return false;
+            return null;
         }
 
         private int GetLoopMode()
@@ -694,17 +1031,17 @@ namespace _1113354_陳冠瑋
         {
             _playRequested = false;
 
-            if (GetLoopMode() == 1)
+            if (GetLoopMode() == 1 && _currentTrack != null)
             {
-                PlayIndex(_currentIndex);
+                PlayTrack(_currentTrack);
                 return;
             }
 
-            int next;
+            TrackItem next = GetNextTrack();
 
-            if (TryGetNextIndex(out next))
+            if (next != null)
             {
-                PlayIndex(next);
+                PlayTrack(next);
             }
             else
             {
@@ -713,36 +1050,175 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private void RemoveSelected()
+        private void SeekFromProgressBar()
         {
-            int index = mLstPlaylist.SelectedIndex;
-
-            if (index < 0 || index >= _playlist.Count)
+            if (!_mciOpen || _durationMs <= 0)
                 return;
 
-            bool removingCurrent = index == _currentIndex;
+            long target = ProgressValueToMs(mTrkProgress.Value);
+            SeekTo(target);
+        }
 
-            if (removingCurrent)
-                CloseMci();
+        private void SeekTo(long targetMs)
+        {
+            if (!_mciOpen)
+                return;
 
-            _playlist.RemoveAt(index);
-            mLstPlaylist.Items.RemoveAt(index);
+            if (targetMs < 0)
+                targetMs = 0;
 
-            if (_playlist.Count == 0)
+            if (_durationMs > 0 && targetMs > _durationMs)
+                targetMs = _durationMs;
+
+            RunMci("seek " + MciAlias + " to " + targetMs, false);
+
+            if (_playRequested || GetModeSafe() == "playing")
+                RunMci("play " + MciAlias, false);
+
+            _lastPositionMs = targetMs;
+            UpdateTimeDisplay(targetMs, _durationMs);
+
+            if (mWaveform != null)
+                mWaveform.PositionMs = targetMs;
+        }
+
+        private void SeekRelative(long offsetMs)
+        {
+            if (!_mciOpen)
+                return;
+
+            long pos = GetPositionSafe();
+            SeekTo(pos + offsetMs);
+        }
+
+        private void SetLoopA()
+        {
+            if (!_mciOpen)
             {
-                _currentIndex = -1;
-                mTxtPath.Clear();
-                mLblNow.Text = "尚未播放";
-                mLblInfo.Text = "WAV 資訊：尚未選取檔案";
-                UpdateTimeDisplay(0, 0);
+                SetStatus("請先播放檔案再設定 A 點。");
+                return;
+            }
+
+            _loopA = GetPositionSafe();
+
+            if (_loopB >= 0 && _loopB <= _loopA)
+                _loopB = -1;
+
+            UpdateABLabel();
+            SetStatus("已設定 A 點：" + FormatTime(_loopA));
+        }
+
+        private void SetLoopB()
+        {
+            if (!_mciOpen)
+            {
+                SetStatus("請先播放檔案再設定 B 點。");
+                return;
+            }
+
+            long now = GetPositionSafe();
+
+            if (_loopA < 0)
+            {
+                SetStatus("請先設定 A 點。");
+                return;
+            }
+
+            if (now <= _loopA + 300)
+            {
+                SetStatus("B 點必須晚於 A 點。");
+                return;
+            }
+
+            _loopB = now;
+            UpdateABLabel();
+            SetStatus("已設定 B 點：" + FormatTime(_loopB));
+        }
+
+        private void ClearABLoop()
+        {
+            _loopA = -1;
+            _loopB = -1;
+            UpdateABLabel();
+            SetStatus("已清除 AB 循環。");
+        }
+
+        private void UpdateABLabel()
+        {
+            if (_loopA >= 0 && _loopB >= 0)
+                mLblAB.Text = "AB：" + FormatTime(_loopA) + " → " + FormatTime(_loopB);
+            else if (_loopA >= 0)
+                mLblAB.Text = "AB：A=" + FormatTime(_loopA) + "，B 未設定";
+            else
+                mLblAB.Text = "AB：未設定";
+        }
+
+        private void ToggleMute()
+        {
+            if (_muted)
+            {
+                _muted = false;
+                mBtnMute.Text = "🔊";
+                mTrkVolume.Value = Math.Max(0, Math.Min(1000, _volumeBeforeMute));
+                ApplyVolume();
+                SetStatus("已取消靜音。");
             }
             else
             {
-                if (_currentIndex > index)
-                    _currentIndex--;
+                _muted = true;
+                _volumeBeforeMute = mTrkVolume.Value;
+                mBtnMute.Text = "🔇";
+                ApplyVolume();
+                SetStatus("已靜音。");
+            }
+        }
 
-                int newIndex = Math.Min(index, _playlist.Count - 1);
-                mLstPlaylist.SelectedIndex = newIndex;
+        private void ApplyVolume()
+        {
+            if (!_mciOpen)
+                return;
+
+            int volume = _muted ? 0 : mTrkVolume.Value;
+            RunMci("setaudio " + MciAlias + " volume to " + volume, false);
+        }
+
+        private void ApplySpeed()
+        {
+            if (!_mciOpen || mTrkSpeed == null)
+                return;
+
+            int speed = mTrkSpeed.Value * 10;
+            RunMci("set " + MciAlias + " speed " + speed, false);
+        }
+
+        private void RemoveSelected()
+        {
+            TrackItem selected = GetSelectedTrack();
+
+            if (selected == null)
+                return;
+
+            bool wasCurrent = _currentTrack != null &&
+                              string.Equals(_currentTrack.Path, selected.Path, StringComparison.OrdinalIgnoreCase);
+
+            if (wasCurrent)
+            {
+                CloseMci();
+                _currentTrack = null;
+            }
+
+            _tracks.Remove(selected);
+
+            RefreshList();
+            UpdateStats();
+
+            if (_tracks.Count == 0)
+            {
+                mLblNow.Text = "尚未播放";
+                mLblSelectedInfo.Text = "WAV 資訊：尚未選取檔案";
+                mTxtPath.Clear();
+                UpdateTimeDisplay(0, 0);
+                mWaveform.SetPeaks(null, 0);
             }
 
             SetStatus("已移除選取項目。");
@@ -750,27 +1226,104 @@ namespace _1113354_陳冠瑋
 
         private void ClearPlaylist()
         {
+            DialogResult result = MessageBox.Show(
+                "確定要清空整個播放清單嗎？",
+                "清空確認",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question
+            );
+
+            if (result == DialogResult.No)
+                return;
+
             CloseMci();
 
-            _playlist.Clear();
-            mLstPlaylist.Items.Clear();
-
-            _currentIndex = -1;
+            _tracks.Clear();
+            _currentTrack = null;
             _durationMs = 0;
             _lastPositionMs = 0;
 
             mTxtPath.Clear();
             mLblNow.Text = "尚未播放";
-            mLblInfo.Text = "WAV 資訊：尚未選取檔案";
-            mTrkProgress.Value = 0;
-            UpdateTimeDisplay(0, 0);
+            mLblSelectedInfo.Text = "WAV 資訊：尚未選取檔案";
+            mWaveform.SetPeaks(null, 0);
+            mVisualizer.Level = 0;
 
+            RefreshList();
+            UpdateStats();
+            UpdateTimeDisplay(0, 0);
             SetStatus("播放清單已清空。");
+        }
+
+        private void CleanMissingFiles()
+        {
+            int before = _tracks.Count;
+
+            if (_currentTrack != null && !File.Exists(_currentTrack.Path))
+            {
+                CloseMci();
+                _currentTrack = null;
+            }
+
+            _tracks.RemoveAll(t => !File.Exists(t.Path));
+
+            int removed = before - _tracks.Count;
+
+            RefreshList();
+            UpdateStats();
+            SetStatus("已清除 " + removed + " 個失效檔案。");
+        }
+
+        private void ToggleSelectedFavorite()
+        {
+            TrackItem selected = GetSelectedTrack();
+
+            if (selected == null)
+                return;
+
+            selected.IsFavorite = !selected.IsFavorite;
+
+            if (selected.IsFavorite)
+                _favoritePaths.Add(selected.Path);
+            else
+                _favoritePaths.Remove(selected.Path);
+
+            RefreshList();
+            UpdateStats();
+
+            SetStatus(selected.IsFavorite ? "已加入收藏。" : "已取消收藏。");
+        }
+
+        private void OpenSelectedInExplorer()
+        {
+            TrackItem selected = GetSelectedTrack();
+
+            if (selected == null)
+                return;
+
+            if (!File.Exists(selected.Path))
+            {
+                SetStatus("檔案不存在。");
+                return;
+            }
+
+            Process.Start("explorer.exe", "/select,\"" + selected.Path + "\"");
+        }
+
+        private void CopySelectedPath()
+        {
+            TrackItem selected = GetSelectedTrack();
+
+            if (selected == null)
+                return;
+
+            Clipboard.SetText(selected.Path);
+            SetStatus("已複製路徑。");
         }
 
         private void SavePlaylist()
         {
-            if (_playlist.Count == 0)
+            if (_tracks.Count == 0)
             {
                 SetStatus("播放清單是空的，無法儲存。");
                 return;
@@ -780,15 +1333,15 @@ namespace _1113354_陳冠瑋
             {
                 sfd.Title = "儲存播放清單";
                 sfd.Filter = "M3U 播放清單 (*.m3u)|*.m3u|文字檔 (*.txt)|*.txt";
-                sfd.FileName = "WAV_Playlist.m3u";
+                sfd.FileName = "WAV播放器_Playlist.m3u";
 
                 if (sfd.ShowDialog() == DialogResult.OK)
                 {
                     List<string> lines = new List<string>();
                     lines.Add("#EXTM3U");
 
-                    foreach (string path in _playlist)
-                        lines.Add(path);
+                    foreach (TrackItem track in _tracks)
+                        lines.Add(track.Path);
 
                     File.WriteAllLines(sfd.FileName, lines.ToArray(), Encoding.UTF8);
                     SetStatus("播放清單已儲存。");
@@ -796,7 +1349,7 @@ namespace _1113354_陳冠瑋
             }
         }
 
-        private void LoadPlaylist()
+        private void LoadPlaylistFromDialog()
         {
             using (OpenFileDialog ofd = new OpenFileDialog())
             {
@@ -821,86 +1374,155 @@ namespace _1113354_陳冠瑋
                         files.Add(item);
                     }
 
-                    AddFilesToPlaylist(files);
+                    AddFilesToPlaylist(files, true);
                     SetStatus("播放清單已載入。");
                 }
             }
         }
 
+        private void ChooseWatchFolder()
+        {
+            using (FolderBrowserDialog fbd = new FolderBrowserDialog())
+            {
+                fbd.Description = "選擇要監看的資料夾，新出現的 WAV 會自動加入播放清單";
+
+                if (fbd.ShowDialog() == DialogResult.OK)
+                    StartWatchingFolder(fbd.SelectedPath);
+            }
+        }
+
+        private void StartWatchingFolder(string folder)
+        {
+            if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+                return;
+
+            StopWatchingFolder(false);
+
+            _watcher = new FileSystemWatcher(folder, "*.wav");
+            _watcher.IncludeSubdirectories = true;
+            _watcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime | NotifyFilters.LastWrite;
+            _watcher.Created += Watcher_FileAppeared;
+            _watcher.Renamed += Watcher_Renamed;
+            _watcher.EnableRaisingEvents = true;
+
+            mLblWatch.Text = "監看：" + folder;
+            SetStatus("已開始監看資料夾：" + folder);
+        }
+
+        private void StopWatchingFolder()
+        {
+            StopWatchingFolder(true);
+        }
+
+        private void StopWatchingFolder(bool showStatus)
+        {
+            if (_watcher != null)
+            {
+                try
+                {
+                    _watcher.EnableRaisingEvents = false;
+                    _watcher.Dispose();
+                }
+                catch
+                {
+                }
+
+                _watcher = null;
+            }
+
+            if (mLblWatch != null)
+                mLblWatch.Text = "監看：未啟用";
+
+            if (showStatus)
+                SetStatus("已停止監看資料夾。");
+        }
+
+        private void Watcher_FileAppeared(object sender, FileSystemEventArgs e)
+        {
+            AddWatchedFileLater(e.FullPath);
+        }
+
+        private void Watcher_Renamed(object sender, RenamedEventArgs e)
+        {
+            AddWatchedFileLater(e.FullPath);
+        }
+
+        private void AddWatchedFileLater(string path)
+        {
+            Task.Factory.StartNew(delegate
+            {
+                System.Threading.Thread.Sleep(800);
+
+                if (IsDisposed)
+                    return;
+
+                try
+                {
+                    BeginInvoke(new Action(delegate
+                    {
+                        AddFilesToPlaylist(new string[] { path }, false);
+                        SetStatus("監看資料夾偵測到新 WAV：" + Path.GetFileName(path));
+                    }));
+                }
+                catch
+                {
+                }
+            });
+        }
+
         private void UpdateSelectedInfo()
         {
-            int index = mLstPlaylist.SelectedIndex;
+            TrackItem selected = GetSelectedTrack();
 
-            if (index < 0 || index >= _playlist.Count)
+            if (selected == null)
                 return;
 
-            string path = _playlist[index];
-            mTxtPath.Text = path;
+            mTxtPath.Text = selected.Path;
+            mLblSelectedInfo.Text = selected.FullDescription;
 
-            if (!_mciOpen || index != _currentIndex)
-                mLblNow.Text = "選取：" + Path.GetFileName(path);
+            if (_currentTrack == null || !string.Equals(_currentTrack.Path, selected.Path, StringComparison.OrdinalIgnoreCase))
+                mLblNow.Text = "選取：" + selected.FileName;
+        }
 
-            try
+        private void UpdateStats()
+        {
+            if (mLblStats == null)
+                return;
+
+            long totalMs = 0;
+            int favoriteCount = 0;
+
+            foreach (TrackItem track in _tracks)
             {
-                WaveInfo info = WaveInfo.Read(path);
-                mLblInfo.Text = info.FullDescription;
+                totalMs += track.DurationMs;
 
-                if (!_mciOpen || index != _currentIndex)
-                    UpdateTimeDisplay(0, info.DurationMs);
+                if (track.IsFavorite)
+                    favoriteCount++;
             }
-            catch (Exception ex)
-            {
-                mLblInfo.Text = "WAV 資訊讀取失敗：" + ex.Message;
-            }
-        }
 
-        private void SeekFromProgressBar()
-        {
-            if (!_mciOpen || _durationMs <= 0)
-                return;
-
-            long target = ProgressValueToMs(mTrkProgress.Value);
-            SeekTo(target);
-        }
-
-        private void SeekTo(long targetMs)
-        {
-            if (!_mciOpen)
-                return;
-
-            if (targetMs < 0)
-                targetMs = 0;
-
-            if (_durationMs > 0 && targetMs > _durationMs)
-                targetMs = _durationMs;
-
-            RunMci("seek " + Alias + " to " + targetMs, false);
-
-            if (_playRequested || GetModeSafe() == "playing")
-                RunMci("play " + Alias, false);
-
-            _lastPositionMs = targetMs;
-            UpdateTimeDisplay(targetMs, _durationMs);
-        }
-
-        private void SeekRelative(long offsetMs)
-        {
-            if (!_mciOpen)
-                return;
-
-            long pos = GetPositionSafe();
-            SeekTo(pos + offsetMs);
+            mLblStats.Text = _tracks.Count + " 首｜" + FormatTime(totalMs) + "｜收藏 " + favoriteCount;
         }
 
         private void UiTimer_Tick(object sender, EventArgs e)
         {
             if (!_mciOpen)
+            {
+                if (mVisualizer != null)
+                    mVisualizer.Level = 0;
+
                 return;
+            }
 
             long pos = GetPositionSafe();
 
             if (_durationMs <= 0)
                 _durationMs = GetLengthSafe();
+
+            if (_loopA >= 0 && _loopB > _loopA && pos >= _loopB - 80)
+            {
+                SeekTo(_loopA);
+                return;
+            }
 
             if (!_isSeeking && _durationMs > 0)
             {
@@ -909,17 +1531,30 @@ namespace _1113354_陳冠瑋
                 mTrkProgress.Value = value;
             }
 
+            if (mWaveform != null)
+                mWaveform.PositionMs = pos;
+
             UpdateTimeDisplay(pos, _durationMs);
 
             string mode = GetModeSafe();
 
             if (mode == "playing")
-                mBtnPause.Text = "⏸ 暫停";
+                mBtnPause.Text = "⏸";
             else if (mode == "paused")
-                mBtnPause.Text = "▶ 繼續";
+                mBtnPause.Text = "▶";
+
+            if (mVisualizer != null)
+            {
+                float level = 0;
+
+                if (mode == "playing")
+                    level = mWaveform == null ? 0.4f : mWaveform.GetPeakAt(pos);
+
+                mVisualizer.Level = level;
+            }
 
             bool reachedEnd = _durationMs > 0 &&
-                              (pos >= _durationMs - 450 || _lastPositionMs >= _durationMs - 450);
+                              (pos >= _durationMs - 420 || _lastPositionMs >= _durationMs - 420);
 
             if (_playRequested && mode == "stopped" && reachedEnd)
             {
@@ -931,29 +1566,40 @@ namespace _1113354_陳冠瑋
             _lastPositionMs = pos;
         }
 
-        private void ApplyVolume()
+        private void LoadWaveformAsync(TrackItem track)
         {
-            if (!_mciOpen || mTrkVolume == null)
+            if (track == null || mWaveform == null)
                 return;
 
-            RunMci("setaudio " + Alias + " volume to " + mTrkVolume.Value, false);
-        }
+            int stamp = ++_waveformLoadStamp;
+            mWaveform.SetPeaks(null, track.DurationMs);
 
-        private void ApplySpeed()
-        {
-            if (!_mciOpen || mTrkSpeed == null)
-                return;
+            Task.Factory.StartNew(delegate
+            {
+                float[] peaks = WaveformAnalyzer.BuildPeaks(track.Path, 900);
 
-            // MCI 的標準速度值：1000 = 原速，所以 50% = 500，200% = 2000
-            int speed = mTrkSpeed.Value * 10;
-            RunMci("set " + Alias + " speed " + speed, false);
+                if (IsDisposed)
+                    return;
+
+                try
+                {
+                    BeginInvoke(new Action(delegate
+                    {
+                        if (stamp == _waveformLoadStamp)
+                            mWaveform.SetPeaks(peaks, track.DurationMs);
+                    }));
+                }
+                catch
+                {
+                }
+            });
         }
 
         private long GetLengthSafe()
         {
             long value;
 
-            if (long.TryParse(QueryMci("status " + Alias + " length"), out value))
+            if (long.TryParse(QueryMci("status " + MciAlias + " length"), out value))
                 return value;
 
             return 0;
@@ -963,7 +1609,7 @@ namespace _1113354_陳冠瑋
         {
             long value;
 
-            if (long.TryParse(QueryMci("status " + Alias + " position"), out value))
+            if (long.TryParse(QueryMci("status " + MciAlias + " position"), out value))
                 return value;
 
             return 0;
@@ -971,7 +1617,7 @@ namespace _1113354_陳冠瑋
 
         private string GetModeSafe()
         {
-            string mode = QueryMci("status " + Alias + " mode");
+            string mode = QueryMci("status " + MciAlias + " mode");
 
             if (string.IsNullOrWhiteSpace(mode))
                 return "";
@@ -983,8 +1629,8 @@ namespace _1113354_陳冠瑋
         {
             if (_mciOpen)
             {
-                RunMci("stop " + Alias, false);
-                RunMci("close " + Alias, false);
+                RunMci("stop " + MciAlias, false);
+                RunMci("close " + MciAlias, false);
             }
 
             _mciOpen = false;
@@ -1005,7 +1651,7 @@ namespace _1113354_陳冠瑋
 
         private static string QueryMci(string command)
         {
-            StringBuilder buffer = new StringBuilder(256);
+            StringBuilder buffer = new StringBuilder(512);
             int error = mciSendString(command, buffer, buffer.Capacity, IntPtr.Zero);
 
             if (error != 0)
@@ -1064,10 +1710,140 @@ namespace _1113354_陳冠瑋
             return string.Format("{0:D2}:{1:D2}", t.Minutes, t.Seconds);
         }
 
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes < 1024)
+                return bytes + " B";
+
+            double kb = bytes / 1024.0;
+
+            if (kb < 1024)
+                return kb.ToString("0.0") + " KB";
+
+            double mb = kb / 1024.0;
+
+            if (mb < 1024)
+                return mb.ToString("0.0") + " MB";
+
+            return (mb / 1024.0).ToString("0.0") + " GB";
+        }
+
         private void SetStatus(string text)
         {
             if (mLblStatus != null)
                 mLblStatus.Text = DateTime.Now.ToString("HH:mm:ss") + "　" + text;
+        }
+
+        private void SaveSession()
+        {
+            try
+            {
+                List<string> lines = new List<string>();
+                lines.Add("VOLUME|" + mTrkVolume.Value);
+                lines.Add("SPEED|" + mTrkSpeed.Value);
+                lines.Add("SHUFFLE|" + (mChkShuffle.Checked ? "1" : "0"));
+                lines.Add("LOOP|" + mCboLoop.SelectedIndex);
+
+                if (_watcher != null)
+                    lines.Add("WATCH|" + _watcher.Path);
+
+                foreach (TrackItem track in _tracks)
+                {
+                    if (track.IsFavorite)
+                        lines.Add("FAV|" + track.Path);
+                }
+
+                foreach (TrackItem track in _tracks)
+                    lines.Add("TRACK|" + track.Path);
+
+                File.WriteAllLines(GetSessionPath(), lines.ToArray(), Encoding.UTF8);
+            }
+            catch
+            {
+            }
+        }
+
+        private void LoadSession()
+        {
+            try
+            {
+                string file = GetSessionPath();
+
+                if (!File.Exists(file))
+                    return;
+
+                List<string> loadTracks = new List<string>();
+                string watchFolder = "";
+
+                foreach (string line in File.ReadAllLines(file, Encoding.UTF8))
+                {
+                    if (line.StartsWith("VOLUME|"))
+                    {
+                        int value;
+                        if (int.TryParse(line.Substring(7), out value))
+                            mTrkVolume.Value = Math.Max(mTrkVolume.Minimum, Math.Min(mTrkVolume.Maximum, value));
+                    }
+                    else if (line.StartsWith("SPEED|"))
+                    {
+                        int value;
+                        if (int.TryParse(line.Substring(6), out value))
+                            mTrkSpeed.Value = Math.Max(mTrkSpeed.Minimum, Math.Min(mTrkSpeed.Maximum, value));
+                    }
+                    else if (line.StartsWith("SHUFFLE|"))
+                    {
+                        mChkShuffle.Checked = line.Substring(8) == "1";
+                    }
+                    else if (line.StartsWith("LOOP|"))
+                    {
+                        int value;
+                        if (int.TryParse(line.Substring(5), out value))
+                        {
+                            if (value >= 0 && value < mCboLoop.Items.Count)
+                                mCboLoop.SelectedIndex = value;
+                        }
+                    }
+                    else if (line.StartsWith("FAV|"))
+                    {
+                        _favoritePaths.Add(line.Substring(4));
+                    }
+                    else if (line.StartsWith("TRACK|"))
+                    {
+                        loadTracks.Add(line.Substring(6));
+                    }
+                    else if (line.StartsWith("WATCH|"))
+                    {
+                        watchFolder = line.Substring(6);
+                    }
+                }
+
+                AddFilesToPlaylist(loadTracks, false);
+
+                foreach (TrackItem track in _tracks)
+                    track.IsFavorite = _favoritePaths.Contains(track.Path);
+
+                RefreshList();
+                UpdateStats();
+
+                if (Directory.Exists(watchFolder))
+                    StartWatchingFolder(watchFolder);
+
+                if (_tracks.Count > 0)
+                    SetStatus("已還原上次播放清單。");
+            }
+            catch
+            {
+            }
+        }
+
+        private static string GetSessionPath()
+        {
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "WAVPlayer"
+            );
+
+            Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "session.txt");
         }
 
         private void Form1_DragEnter(object sender, DragEventArgs e)
@@ -1081,12 +1857,22 @@ namespace _1113354_陳冠瑋
             string[] paths = e.Data.GetData(DataFormats.FileDrop) as string[];
 
             if (paths != null)
-                AddFilesToPlaylist(paths);
+                AddFilesToPlaylist(paths, true);
         }
 
         private void Form1_KeyDown(object sender, KeyEventArgs e)
         {
-            if (e.KeyCode == Keys.Space)
+            if (e.Control && e.KeyCode == Keys.O)
+            {
+                AddFilesFromDialog();
+                e.Handled = true;
+            }
+            else if (e.Control && e.KeyCode == Keys.F)
+            {
+                mTxtSearch.Focus();
+                e.Handled = true;
+            }
+            else if (e.KeyCode == Keys.Space)
             {
                 TogglePause();
                 e.Handled = true;
@@ -1111,9 +1897,14 @@ namespace _1113354_陳冠瑋
                 PlayPrevious();
                 e.Handled = true;
             }
-            else if (e.KeyCode == Keys.Delete && mLstPlaylist.Focused)
+            else if (e.KeyCode == Keys.Delete && mList.Focused)
             {
                 RemoveSelected();
+                e.Handled = true;
+            }
+            else if (e.KeyCode == Keys.Enter && mList.Focused)
+            {
+                PlaySelectedOrCurrent();
                 e.Handled = true;
             }
         }
@@ -1121,7 +1912,7 @@ namespace _1113354_陳冠瑋
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
             DialogResult result = MessageBox.Show(
-                "確定要關閉應用程式嗎？",
+                "確定要關閉 WAV播放器 嗎？",
                 "關閉確認",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Question
@@ -1133,10 +1924,72 @@ namespace _1113354_陳冠瑋
                 return;
             }
 
+            SaveSession();
+            StopWatchingFolder(false);
             CloseMci();
         }
 
-        // 以下保留舊按鈕事件名稱，避免 Designer 還有綁定時編譯失敗
+        private void List_DrawColumnHeader(object sender, DrawListViewColumnHeaderEventArgs e)
+        {
+            using (SolidBrush b = new SolidBrush(AppColor.Card3))
+                e.Graphics.FillRectangle(b, e.Bounds);
+
+            TextRenderer.DrawText(
+                e.Graphics,
+                e.Header.Text,
+                Font,
+                e.Bounds,
+                AppColor.SubText,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis
+            );
+        }
+
+        private void List_DrawSubItem(object sender, DrawListViewSubItemEventArgs e)
+        {
+            bool selected = e.Item.Selected;
+            Color bg = selected ? AppColor.Selected : AppColor.Card2;
+            Color fg = selected ? Color.White : AppColor.Text;
+
+            if (e.ColumnIndex == 0)
+            {
+                TrackItem t = e.Item.Tag as TrackItem;
+
+                if (t != null && t.IsFavorite && e.SubItem.Text == "★")
+                    fg = AppColor.Warning;
+
+                if (e.SubItem.Text == "▶")
+                    fg = AppColor.Accent2;
+            }
+
+            using (SolidBrush b = new SolidBrush(bg))
+                e.Graphics.FillRectangle(b, e.Bounds);
+
+            Rectangle textRect = e.Bounds;
+            textRect.Inflate(-6, 0);
+
+            TextRenderer.DrawText(
+                e.Graphics,
+                e.SubItem.Text,
+                Font,
+                textRect,
+                fg,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis
+            );
+        }
+
+        private void ShowAudioToolboxPage()
+        {
+            AudioToolboxForm page = new AudioToolboxForm(this);
+            page.Show(this);
+        }
+
+        private void ShowDashboardPage()
+        {
+            DashboardForm page = new DashboardForm(this);
+            page.Show(this);
+        }
+
+        // 保留舊 Designer 事件名稱，避免原本設計器還有綁定時編譯失敗
         private void btnBrowse_Click(object sender, EventArgs e)
         {
             AddFilesFromDialog();
@@ -1165,6 +2018,633 @@ namespace _1113354_陳冠瑋
             Close();
         }
 
+        private class AudioToolboxForm : Form
+        {
+            private readonly Form1 _host;
+            private TextBox _log;
+
+            public AudioToolboxForm(Form1 host)
+            {
+                _host = host;
+                BuildUI();
+            }
+
+            private void BuildUI()
+            {
+                Text = "WAV播放器 - 音訊工具箱";
+                Size = new Size(920, 620);
+                MinimumSize = new Size(820, 520);
+                StartPosition = FormStartPosition.CenterParent;
+                BackColor = AppColor.Bg;
+                ForeColor = AppColor.Text;
+                Font = new Font("Microsoft JhengHei UI", 10F);
+
+                TableLayoutPanel root = new TableLayoutPanel();
+                root.Dock = DockStyle.Fill;
+                root.Padding = new Padding(18);
+                root.RowCount = 3;
+                root.ColumnCount = 1;
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 142));
+                root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+                Controls.Add(root);
+
+                Label title = new Label();
+                title.Text = "音訊工具箱";
+                title.Dock = DockStyle.Fill;
+                title.ForeColor = Color.White;
+                title.Font = new Font("Microsoft JhengHei UI", 24F, FontStyle.Bold);
+                title.TextAlign = ContentAlignment.MiddleLeft;
+                root.Controls.Add(title, 0, 0);
+
+                FlowLayoutPanel tools = new FlowLayoutPanel();
+                tools.Dock = DockStyle.Fill;
+                tools.WrapContents = true;
+                tools.Padding = new Padding(0, 8, 0, 8);
+                tools.BackColor = AppColor.Bg;
+                root.Controls.Add(tools, 0, 1);
+
+                tools.Controls.Add(MakeToolButton("檢查完整性", RunIntegrityCheck));
+                tools.Controls.Add(MakeToolButton("匯出 CSV 報表", ExportCsv));
+                tools.Controls.Add(MakeToolButton("匯出 HTML 報表", ExportHtml));
+                tools.Controls.Add(MakeToolButton("偵測目前檔案靜音段", DetectSilenceCurrent));
+                tools.Controls.Add(MakeToolButton("反轉目前 WAV", ReverseCurrentWav));
+                tools.Controls.Add(MakeToolButton("淡入淡出目前 WAV", FadeCurrentWav));
+                tools.Controls.Add(MakeToolButton("音量正規化目前 WAV", NormalizeCurrentWav));
+                tools.Controls.Add(MakeToolButton("備份目前檔案", BackupCurrentFile));
+
+                _log = new TextBox();
+                _log.Dock = DockStyle.Fill;
+                _log.Multiline = true;
+                _log.ScrollBars = ScrollBars.Both;
+                _log.ReadOnly = true;
+                _log.WordWrap = false;
+                _log.BackColor = AppColor.Input;
+                _log.ForeColor = AppColor.Text;
+                _log.BorderStyle = BorderStyle.FixedSingle;
+                _log.Font = new Font("Consolas", 10F);
+                root.Controls.Add(_log, 0, 2);
+
+                WriteLog("音訊工具箱已啟動。");
+                WriteLog("目前播放清單：" + _host._tracks.Count + " 個 WAV 檔案。");
+            }
+
+            private Button MakeToolButton(string text, Action action)
+            {
+                Button btn = new Button();
+                btn.Text = text;
+                btn.Width = 190;
+                btn.Height = 38;
+                btn.Margin = new Padding(0, 0, 10, 10);
+                btn.FlatStyle = FlatStyle.Flat;
+                btn.FlatAppearance.BorderSize = 0;
+                btn.BackColor = AppColor.Accent;
+                btn.ForeColor = Color.White;
+                btn.Font = new Font("Microsoft JhengHei UI", 9F, FontStyle.Bold);
+                btn.Cursor = Cursors.Hand;
+                btn.Click += delegate
+                {
+                    try
+                    {
+                        action();
+                    }
+                    catch (Exception ex)
+                    {
+                        WriteLog("錯誤：" + ex.Message);
+                        MessageBox.Show(ex.Message, "操作失敗", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                };
+
+                return btn;
+            }
+
+            private void WriteLog(string text)
+            {
+                if (_log == null)
+                    return;
+
+                _log.AppendText("[" + DateTime.Now.ToString("HH:mm:ss") + "] " + text + Environment.NewLine);
+            }
+
+            private TrackItem GetTargetTrack()
+            {
+                TrackItem selected = _host.GetSelectedTrack();
+
+                if (selected != null)
+                    return selected;
+
+                if (_host._currentTrack != null)
+                    return _host._currentTrack;
+
+                return null;
+            }
+
+            private void RunIntegrityCheck()
+            {
+                WriteLog("開始檢查 WAV 完整性...");
+
+                int ok = 0;
+                int fail = 0;
+
+                foreach (TrackItem track in _host._tracks)
+                {
+                    if (!File.Exists(track.Path))
+                    {
+                        fail++;
+                        WriteLog("遺失：" + track.Path);
+                        continue;
+                    }
+
+                    try
+                    {
+                        WaveInfo info = WaveInfo.Read(track.Path);
+
+                        if (info.DurationMs <= 0)
+                        {
+                            fail++;
+                            WriteLog("異常長度：" + track.FileName);
+                        }
+                        else
+                        {
+                            ok++;
+                            WriteLog("正常：" + track.FileName + "｜" + info.FormatName + "｜" + Form1.FormatTime(info.DurationMs));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        fail++;
+                        WriteLog("錯誤：" + track.FileName + "｜" + ex.Message);
+                    }
+                }
+
+                WriteLog("檢查完成。正常 " + ok + " 個，異常 " + fail + " 個。");
+            }
+
+            private void ExportCsv()
+            {
+                if (_host._tracks.Count == 0)
+                {
+                    WriteLog("播放清單是空的，無法匯出。");
+                    return;
+                }
+
+                using (SaveFileDialog sfd = new SaveFileDialog())
+                {
+                    sfd.Title = "匯出 CSV 報表";
+                    sfd.Filter = "CSV 檔案 (*.csv)|*.csv";
+                    sfd.FileName = "WAV播放器_音訊報表.csv";
+
+                    if (sfd.ShowDialog() != DialogResult.OK)
+                        return;
+
+                    StringBuilder sb = new StringBuilder();
+                    sb.AppendLine("檔名,長度,格式,取樣率,聲道,位元,大小,收藏,路徑");
+
+                    foreach (TrackItem t in _host._tracks)
+                    {
+                        sb.AppendLine(
+                            Csv(t.FileName) + "," +
+                            Csv(Form1.FormatTime(t.DurationMs)) + "," +
+                            Csv(t.FormatName) + "," +
+                            Csv(t.SampleRate.ToString()) + "," +
+                            Csv(t.Channels.ToString()) + "," +
+                            Csv(t.BitsPerSample.ToString()) + "," +
+                            Csv(Form1.FormatBytes(t.FileSize)) + "," +
+                            Csv(t.IsFavorite ? "是" : "否") + "," +
+                            Csv(t.Path)
+                        );
+                    }
+
+                    File.WriteAllText(sfd.FileName, sb.ToString(), Encoding.UTF8);
+                    WriteLog("已匯出 CSV：" + sfd.FileName);
+                }
+            }
+
+            private void ExportHtml()
+            {
+                if (_host._tracks.Count == 0)
+                {
+                    WriteLog("播放清單是空的，無法匯出。");
+                    return;
+                }
+
+                using (SaveFileDialog sfd = new SaveFileDialog())
+                {
+                    sfd.Title = "匯出 HTML 報表";
+                    sfd.Filter = "HTML 檔案 (*.html)|*.html";
+                    sfd.FileName = "WAV播放器_音訊報表.html";
+
+                    if (sfd.ShowDialog() != DialogResult.OK)
+                        return;
+
+                    long totalMs = _host._tracks.Sum(t => t.DurationMs);
+                    long totalBytes = _host._tracks.Sum(t => t.FileSize);
+
+                    StringBuilder sb = new StringBuilder();
+
+                    sb.AppendLine("<!doctype html>");
+                    sb.AppendLine("<html lang=\"zh-Hant\"><head><meta charset=\"utf-8\">");
+                    sb.AppendLine("<title>WAV播放器 音訊報表</title>");
+                    sb.AppendLine("<style>");
+                    sb.AppendLine("body{font-family:'Microsoft JhengHei',sans-serif;background:#0f121c;color:#ebeef8;padding:32px;}");
+                    sb.AppendLine("h1{font-size:32px;margin-bottom:8px;}");
+                    sb.AppendLine(".card{background:#191e2d;border:1px solid #373f55;border-radius:18px;padding:20px;margin:16px 0;}");
+                    sb.AppendLine("table{border-collapse:collapse;width:100%;font-size:14px;}");
+                    sb.AppendLine("th,td{border-bottom:1px solid #373f55;padding:10px;text-align:left;}");
+                    sb.AppendLine("th{color:#54d2ff;}");
+                    sb.AppendLine(".sub{color:#a0aac3;}");
+                    sb.AppendLine("</style></head><body>");
+                    sb.AppendLine("<h1>WAV播放器 音訊報表</h1>");
+                    sb.AppendLine("<div class=\"sub\">產生時間：" + Html(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")) + "</div>");
+                    sb.AppendLine("<div class=\"card\">");
+                    sb.AppendLine("總檔案數：" + _host._tracks.Count + "<br>");
+                    sb.AppendLine("總長度：" + Html(Form1.FormatTime(totalMs)) + "<br>");
+                    sb.AppendLine("總大小：" + Html(Form1.FormatBytes(totalBytes)));
+                    sb.AppendLine("</div>");
+                    sb.AppendLine("<div class=\"card\"><table>");
+                    sb.AppendLine("<tr><th>檔名</th><th>長度</th><th>格式</th><th>取樣率</th><th>聲道</th><th>位元</th><th>大小</th><th>收藏</th><th>路徑</th></tr>");
+
+                    foreach (TrackItem t in _host._tracks)
+                    {
+                        sb.AppendLine("<tr>");
+                        sb.AppendLine("<td>" + Html(t.FileName) + "</td>");
+                        sb.AppendLine("<td>" + Html(Form1.FormatTime(t.DurationMs)) + "</td>");
+                        sb.AppendLine("<td>" + Html(t.FormatName) + "</td>");
+                        sb.AppendLine("<td>" + Html(t.SampleRate + " Hz") + "</td>");
+                        sb.AppendLine("<td>" + Html(t.Channels.ToString()) + "</td>");
+                        sb.AppendLine("<td>" + Html(t.BitsPerSample + " bit") + "</td>");
+                        sb.AppendLine("<td>" + Html(Form1.FormatBytes(t.FileSize)) + "</td>");
+                        sb.AppendLine("<td>" + Html(t.IsFavorite ? "★" : "") + "</td>");
+                        sb.AppendLine("<td>" + Html(t.Path) + "</td>");
+                        sb.AppendLine("</tr>");
+                    }
+
+                    sb.AppendLine("</table></div>");
+                    sb.AppendLine("</body></html>");
+
+                    File.WriteAllText(sfd.FileName, sb.ToString(), Encoding.UTF8);
+                    WriteLog("已匯出 HTML：" + sfd.FileName);
+                }
+            }
+
+            private void DetectSilenceCurrent()
+            {
+                TrackItem t = GetTargetTrack();
+
+                if (t == null)
+                {
+                    WriteLog("請先選取或播放一個 WAV 檔案。");
+                    return;
+                }
+
+                WriteLog("開始偵測靜音段：" + t.FileName);
+
+                float[] peaks = WaveformAnalyzer.BuildPeaks(t.Path, 2400);
+
+                if (peaks == null || peaks.Length == 0 || t.DurationMs <= 0)
+                {
+                    WriteLog("無法分析此檔案。");
+                    return;
+                }
+
+                double msPerPeak = t.DurationMs / (double)peaks.Length;
+                int minSilentPeaks = Math.Max(1, (int)Math.Ceiling(800 / msPerPeak));
+                float threshold = 0.015f;
+                int count = 0;
+
+                int i = 0;
+
+                while (i < peaks.Length)
+                {
+                    if (peaks[i] > threshold)
+                    {
+                        i++;
+                        continue;
+                    }
+
+                    int start = i;
+
+                    while (i < peaks.Length && peaks[i] <= threshold)
+                        i++;
+
+                    int end = i - 1;
+                    int len = end - start + 1;
+
+                    if (len >= minSilentPeaks)
+                    {
+                        long startMs = (long)(start * msPerPeak);
+                        long endMs = (long)(end * msPerPeak);
+                        count++;
+
+                        WriteLog("靜音段 " + count + "：" + Form1.FormatTime(startMs) + " ~ " + Form1.FormatTime(endMs));
+                    }
+                }
+
+                if (count == 0)
+                    WriteLog("沒有偵測到超過 0.8 秒的明顯靜音段。");
+                else
+                    WriteLog("靜音段偵測完成，共 " + count + " 段。");
+            }
+
+            private void ReverseCurrentWav()
+            {
+                TrackItem t = GetTargetTrack();
+
+                if (t == null)
+                {
+                    WriteLog("請先選取或播放一個 WAV 檔案。");
+                    return;
+                }
+
+                using (SaveFileDialog sfd = new SaveFileDialog())
+                {
+                    sfd.Title = "輸出反轉 WAV";
+                    sfd.Filter = "WAV 檔案 (*.wav)|*.wav";
+                    sfd.FileName = Path.GetFileNameWithoutExtension(t.Path) + "_反轉.wav";
+
+                    if (sfd.ShowDialog() != DialogResult.OK)
+                        return;
+
+                    WavEditor.ReverseFrames(t.Path, sfd.FileName);
+                    WriteLog("已輸出反轉 WAV：" + sfd.FileName);
+                }
+            }
+
+            private void FadeCurrentWav()
+            {
+                TrackItem t = GetTargetTrack();
+
+                if (t == null)
+                {
+                    WriteLog("請先選取或播放一個 WAV 檔案。");
+                    return;
+                }
+
+                using (SaveFileDialog sfd = new SaveFileDialog())
+                {
+                    sfd.Title = "輸出淡入淡出 WAV";
+                    sfd.Filter = "WAV 檔案 (*.wav)|*.wav";
+                    sfd.FileName = Path.GetFileNameWithoutExtension(t.Path) + "_淡入淡出.wav";
+
+                    if (sfd.ShowDialog() != DialogResult.OK)
+                        return;
+
+                    WavEditor.ApplyFade(t.Path, sfd.FileName, 1000);
+                    WriteLog("已輸出淡入淡出 WAV：" + sfd.FileName);
+                }
+            }
+
+            private void NormalizeCurrentWav()
+            {
+                TrackItem t = GetTargetTrack();
+
+                if (t == null)
+                {
+                    WriteLog("請先選取或播放一個 WAV 檔案。");
+                    return;
+                }
+
+                using (SaveFileDialog sfd = new SaveFileDialog())
+                {
+                    sfd.Title = "輸出音量正規化 WAV";
+                    sfd.Filter = "WAV 檔案 (*.wav)|*.wav";
+                    sfd.FileName = Path.GetFileNameWithoutExtension(t.Path) + "_正規化.wav";
+
+                    if (sfd.ShowDialog() != DialogResult.OK)
+                        return;
+
+                    WavEditor.Normalize(t.Path, sfd.FileName, 0.95);
+                    WriteLog("已輸出正規化 WAV：" + sfd.FileName);
+                }
+            }
+
+            private void BackupCurrentFile()
+            {
+                TrackItem t = GetTargetTrack();
+
+                if (t == null)
+                {
+                    WriteLog("請先選取或播放一個 WAV 檔案。");
+                    return;
+                }
+
+                using (SaveFileDialog sfd = new SaveFileDialog())
+                {
+                    sfd.Title = "備份目前 WAV";
+                    sfd.Filter = "WAV 檔案 (*.wav)|*.wav";
+                    sfd.FileName = Path.GetFileNameWithoutExtension(t.Path) + "_備份.wav";
+
+                    if (sfd.ShowDialog() != DialogResult.OK)
+                        return;
+
+                    File.Copy(t.Path, sfd.FileName, true);
+                    WriteLog("已備份：" + sfd.FileName);
+                }
+            }
+
+            private static string Csv(string value)
+            {
+                if (value == null)
+                    value = "";
+
+                return "\"" + value.Replace("\"", "\"\"") + "\"";
+            }
+
+            private static string Html(string value)
+            {
+                if (value == null)
+                    return "";
+
+                return value
+                    .Replace("&", "&amp;")
+                    .Replace("<", "&lt;")
+                    .Replace(">", "&gt;")
+                    .Replace("\"", "&quot;");
+            }
+        }
+
+        private class DashboardForm : Form
+        {
+            private readonly Form1 _host;
+            private Label _summary;
+            private TextBox _detail;
+            private MiniBarChart _chart;
+
+            public DashboardForm(Form1 host)
+            {
+                _host = host;
+                BuildUI();
+                RefreshDashboard();
+            }
+
+            private void BuildUI()
+            {
+                Text = "WAV播放器 - 統計頁";
+                Size = new Size(900, 620);
+                MinimumSize = new Size(780, 520);
+                StartPosition = FormStartPosition.CenterParent;
+                BackColor = AppColor.Bg;
+                ForeColor = AppColor.Text;
+                Font = new Font("Microsoft JhengHei UI", 10F);
+
+                TableLayoutPanel root = new TableLayoutPanel();
+                root.Dock = DockStyle.Fill;
+                root.Padding = new Padding(18);
+                root.RowCount = 4;
+                root.ColumnCount = 1;
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
+                root.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
+                root.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
+                Controls.Add(root);
+
+                Label title = new Label();
+                title.Text = "統計儀表板";
+                title.Dock = DockStyle.Fill;
+                title.ForeColor = Color.White;
+                title.Font = new Font("Microsoft JhengHei UI", 24F, FontStyle.Bold);
+                title.TextAlign = ContentAlignment.MiddleLeft;
+                root.Controls.Add(title, 0, 0);
+
+                _summary = new Label();
+                _summary.Dock = DockStyle.Fill;
+                _summary.ForeColor = AppColor.Text;
+                _summary.Font = new Font("Microsoft JhengHei UI", 12F, FontStyle.Bold);
+                _summary.TextAlign = ContentAlignment.MiddleLeft;
+                root.Controls.Add(_summary, 0, 1);
+
+                _chart = new MiniBarChart();
+                _chart.Dock = DockStyle.Fill;
+                _chart.Margin = new Padding(0, 0, 0, 14);
+                root.Controls.Add(_chart, 0, 2);
+
+                _detail = new TextBox();
+                _detail.Dock = DockStyle.Fill;
+                _detail.Multiline = true;
+                _detail.ScrollBars = ScrollBars.Both;
+                _detail.ReadOnly = true;
+                _detail.WordWrap = false;
+                _detail.BackColor = AppColor.Input;
+                _detail.ForeColor = AppColor.Text;
+                _detail.BorderStyle = BorderStyle.FixedSingle;
+                _detail.Font = new Font("Consolas", 10F);
+                root.Controls.Add(_detail, 0, 3);
+            }
+
+            private void RefreshDashboard()
+            {
+                int count = _host._tracks.Count;
+                long totalMs = _host._tracks.Sum(t => t.DurationMs);
+                long totalBytes = _host._tracks.Sum(t => t.FileSize);
+                int favCount = _host._tracks.Count(t => t.IsFavorite);
+
+                TrackItem longest = _host._tracks.OrderByDescending(t => t.DurationMs).FirstOrDefault();
+                TrackItem biggest = _host._tracks.OrderByDescending(t => t.FileSize).FirstOrDefault();
+
+                double avgRate = count == 0 ? 0 : _host._tracks.Average(t => t.SampleRate);
+                double avgBits = count == 0 ? 0 : _host._tracks.Average(t => t.BitsPerSample);
+
+                _summary.Text =
+                    "總曲數 " + count +
+                    "　｜　總長度 " + Form1.FormatTime(totalMs) +
+                    "　｜　總大小 " + Form1.FormatBytes(totalBytes) +
+                    "　｜　收藏 " + favCount;
+
+                Dictionary<string, int> formatData = _host._tracks
+                    .GroupBy(t => t.FormatName)
+                    .OrderByDescending(g => g.Count())
+                    .ToDictionary(g => g.Key, g => g.Count());
+
+                _chart.SetData(formatData, "格式分布");
+
+                StringBuilder sb = new StringBuilder();
+
+                sb.AppendLine("WAV播放器 統計摘要");
+                sb.AppendLine("產生時間：" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                sb.AppendLine();
+                sb.AppendLine("總曲數：" + count);
+                sb.AppendLine("總長度：" + Form1.FormatTime(totalMs));
+                sb.AppendLine("總大小：" + Form1.FormatBytes(totalBytes));
+                sb.AppendLine("收藏數：" + favCount);
+                sb.AppendLine("平均取樣率：" + avgRate.ToString("0") + " Hz");
+                sb.AppendLine("平均位元深度：" + avgBits.ToString("0.0") + " bit");
+                sb.AppendLine();
+
+                if (longest != null)
+                {
+                    sb.AppendLine("最長檔案：" + longest.FileName);
+                    sb.AppendLine("長度：" + Form1.FormatTime(longest.DurationMs));
+                    sb.AppendLine("路徑：" + longest.Path);
+                    sb.AppendLine();
+                }
+
+                if (biggest != null)
+                {
+                    sb.AppendLine("最大檔案：" + biggest.FileName);
+                    sb.AppendLine("大小：" + Form1.FormatBytes(biggest.FileSize));
+                    sb.AppendLine("路徑：" + biggest.Path);
+                    sb.AppendLine();
+                }
+
+                sb.AppendLine("格式分布：");
+
+                foreach (var pair in formatData)
+                    sb.AppendLine("- " + pair.Key + "：" + pair.Value + " 個");
+
+                sb.AppendLine();
+                sb.AppendLine("取樣率分布：");
+
+                foreach (var group in _host._tracks.GroupBy(t => t.SampleRate).OrderByDescending(g => g.Count()))
+                    sb.AppendLine("- " + group.Key + " Hz：" + group.Count() + " 個");
+
+                _detail.Text = sb.ToString();
+            }
+        }
+
+        private class TrackItem
+        {
+            public string Path;
+            public string FileName;
+            public string FormatName;
+            public short Channels;
+            public int SampleRate;
+            public short BitsPerSample;
+            public long DurationMs;
+            public long FileSize;
+            public bool IsFavorite;
+
+            public string FullDescription
+            {
+                get
+                {
+                    return FormatName + "｜" +
+                           Channels + " 聲道｜" +
+                           SampleRate + " Hz｜" +
+                           BitsPerSample + " bit｜" +
+                           FormatBytes(FileSize) + "｜" +
+                           FormatTime(DurationMs);
+                }
+            }
+
+            public static TrackItem FromFile(string path)
+            {
+                WaveInfo info = WaveInfo.Read(path);
+                FileInfo file = new FileInfo(path);
+
+                TrackItem item = new TrackItem();
+                item.Path = path;
+                item.FileName = System.IO.Path.GetFileName(path);
+                item.FormatName = info.FormatName;
+                item.Channels = info.Channels;
+                item.SampleRate = info.SampleRate;
+                item.BitsPerSample = info.BitsPerSample;
+                item.DurationMs = info.DurationMs;
+                item.FileSize = file.Length;
+
+                return item;
+            }
+        }
+
         private class WaveInfo
         {
             public short AudioFormat;
@@ -1173,6 +2653,7 @@ namespace _1113354_陳冠瑋
             public int ByteRate;
             public short BlockAlign;
             public short BitsPerSample;
+            public long DataOffset;
             public long DataBytes;
             public long DurationMs;
 
@@ -1185,30 +2666,7 @@ namespace _1113354_陳冠瑋
                     if (AudioFormat == 3)
                         return "IEEE Float";
 
-                    return "格式代碼 " + AudioFormat;
-                }
-            }
-
-            public string ShortDescription
-            {
-                get
-                {
-                    return Channels + " 聲道 / " +
-                           SampleRate + " Hz / " +
-                           BitsPerSample + " bit";
-                }
-            }
-
-            public string FullDescription
-            {
-                get
-                {
-                    return "WAV 資訊：" +
-                           FormatName + "｜" +
-                           Channels + " 聲道｜" +
-                           SampleRate + " Hz｜" +
-                           BitsPerSample + " bit｜" +
-                           "長度 " + FormatTime(DurationMs);
+                    return "格式 " + AudioFormat;
                 }
             }
 
@@ -1235,7 +2693,8 @@ namespace _1113354_陳冠瑋
                     {
                         string chunkId = ReadFourCC(br);
                         uint chunkSize = br.ReadUInt32();
-                        long nextChunk = fs.Position + chunkSize;
+                        long chunkStart = fs.Position;
+                        long nextChunk = chunkStart + chunkSize;
 
                         if (chunkId == "fmt " && chunkSize >= 16)
                         {
@@ -1248,10 +2707,11 @@ namespace _1113354_陳冠瑋
                         }
                         else if (chunkId == "data")
                         {
+                            info.DataOffset = chunkStart;
                             info.DataBytes = chunkSize;
                         }
 
-                        fs.Position = nextChunk;
+                        fs.Position = Math.Min(nextChunk, fs.Length);
 
                         if ((chunkSize & 1) == 1 && fs.Position < fs.Length)
                             fs.Position++;
@@ -1259,6 +2719,9 @@ namespace _1113354_陳冠瑋
 
                     if (info.ByteRate > 0 && info.DataBytes > 0)
                         info.DurationMs = info.DataBytes * 1000 / info.ByteRate;
+
+                    if (info.Channels <= 0 || info.SampleRate <= 0 || info.BitsPerSample <= 0)
+                        throw new InvalidDataException("WAV 格式資訊不完整。");
 
                     return info;
                 }
@@ -1273,6 +2736,886 @@ namespace _1113354_陳冠瑋
 
                 return Encoding.ASCII.GetString(bytes);
             }
+        }
+
+        private static class WaveformAnalyzer
+        {
+            public static float[] BuildPeaks(string path, int desiredPeaks)
+            {
+                try
+                {
+                    WaveInfo info = WaveInfo.Read(path);
+
+                    if (info.DataOffset <= 0 || info.DataBytes <= 0 || info.BlockAlign <= 0)
+                        return new float[0];
+
+                    if (info.AudioFormat != 1 && info.AudioFormat != 3)
+                        return new float[0];
+
+                    int bytesPerSample = info.BitsPerSample / 8;
+
+                    if (bytesPerSample <= 0)
+                        return new float[0];
+
+                    long totalFrames = info.DataBytes / info.BlockAlign;
+
+                    if (totalFrames <= 0)
+                        return new float[0];
+
+                    int peakCount = (int)Math.Min(desiredPeaks, totalFrames);
+                    peakCount = Math.Max(1, peakCount);
+
+                    float[] peaks = new float[peakCount];
+
+                    using (FileStream fs = File.OpenRead(path))
+                    {
+                        byte[] frame = new byte[info.BlockAlign];
+
+                        for (int i = 0; i < peakCount; i++)
+                        {
+                            long startFrame = i * totalFrames / peakCount;
+                            long endFrame = (i + 1) * totalFrames / peakCount;
+                            long framesInBucket = Math.Max(1, endFrame - startFrame);
+                            long step = Math.Max(1, framesInBucket / 180);
+
+                            float max = 0;
+
+                            for (long f = startFrame; f < endFrame; f += step)
+                            {
+                                long pos = info.DataOffset + f * info.BlockAlign;
+
+                                if (pos < 0 || pos + info.BlockAlign > fs.Length)
+                                    break;
+
+                                fs.Position = pos;
+
+                                int read = fs.Read(frame, 0, frame.Length);
+
+                                if (read < frame.Length)
+                                    break;
+
+                                for (int ch = 0; ch < info.Channels; ch++)
+                                {
+                                    int offset = ch * bytesPerSample;
+
+                                    if (offset + bytesPerSample > frame.Length)
+                                        continue;
+
+                                    float sample = Math.Abs(ReadSample(frame, offset, info));
+
+                                    if (sample > max)
+                                        max = sample;
+                                }
+                            }
+
+                            if (max > 1)
+                                max = 1;
+
+                            peaks[i] = max;
+                        }
+                    }
+
+                    return peaks;
+                }
+                catch
+                {
+                    return new float[0];
+                }
+            }
+
+            private static float ReadSample(byte[] frame, int offset, WaveInfo info)
+            {
+                if (info.AudioFormat == 3 && info.BitsPerSample == 32)
+                    return BitConverter.ToSingle(frame, offset);
+
+                if (info.BitsPerSample == 8)
+                    return (frame[offset] - 128) / 128f;
+
+                if (info.BitsPerSample == 16)
+                    return BitConverter.ToInt16(frame, offset) / 32768f;
+
+                if (info.BitsPerSample == 24)
+                {
+                    int value = frame[offset] |
+                                (frame[offset + 1] << 8) |
+                                (frame[offset + 2] << 16);
+
+                    if ((value & 0x800000) != 0)
+                        value |= unchecked((int)0xFF000000);
+
+                    return value / 8388608f;
+                }
+
+                if (info.BitsPerSample == 32)
+                    return BitConverter.ToInt32(frame, offset) / 2147483648f;
+
+                return 0;
+            }
+        }
+
+        private static class WavEditor
+        {
+            public static void ReverseFrames(string input, string output)
+            {
+                WaveInfo info = WaveInfo.Read(input);
+                EnsureEditable(info);
+                EnsureSmallEnough(info);
+
+                byte[] file = File.ReadAllBytes(input);
+                byte[] data = new byte[(int)info.DataBytes];
+
+                Buffer.BlockCopy(file, (int)info.DataOffset, data, 0, data.Length);
+
+                int block = info.BlockAlign;
+                int frames = data.Length / block;
+
+                byte[] reversed = new byte[data.Length];
+
+                for (int i = 0; i < frames; i++)
+                {
+                    Buffer.BlockCopy(data, i * block, reversed, (frames - 1 - i) * block, block);
+                }
+
+                int remainStart = frames * block;
+
+                if (remainStart < data.Length)
+                    Buffer.BlockCopy(data, remainStart, reversed, remainStart, data.Length - remainStart);
+
+                Buffer.BlockCopy(reversed, 0, file, (int)info.DataOffset, reversed.Length);
+                File.WriteAllBytes(output, file);
+            }
+
+            public static void ApplyFade(string input, string output, int fadeMs)
+            {
+                WaveInfo info = WaveInfo.Read(input);
+                EnsureEditable(info);
+                EnsureSmallEnough(info);
+
+                byte[] file = File.ReadAllBytes(input);
+                byte[] data = new byte[(int)info.DataBytes];
+
+                Buffer.BlockCopy(file, (int)info.DataOffset, data, 0, data.Length);
+
+                int frames = data.Length / info.BlockAlign;
+                int fadeFrames = Math.Max(1, (int)(info.SampleRate * (fadeMs / 1000.0)));
+
+                for (int f = 0; f < frames; f++)
+                {
+                    double gain = 1.0;
+
+                    if (f < fadeFrames)
+                        gain = Math.Min(gain, f / (double)fadeFrames);
+
+                    int remain = frames - 1 - f;
+
+                    if (remain < fadeFrames)
+                        gain = Math.Min(gain, remain / (double)fadeFrames);
+
+                    ApplyGainToFrame(data, f * info.BlockAlign, info, gain);
+                }
+
+                Buffer.BlockCopy(data, 0, file, (int)info.DataOffset, data.Length);
+                File.WriteAllBytes(output, file);
+            }
+
+            public static void Normalize(string input, string output, double targetPeak)
+            {
+                WaveInfo info = WaveInfo.Read(input);
+                EnsureEditable(info);
+                EnsureSmallEnough(info);
+
+                byte[] file = File.ReadAllBytes(input);
+                byte[] data = new byte[(int)info.DataBytes];
+
+                Buffer.BlockCopy(file, (int)info.DataOffset, data, 0, data.Length);
+
+                double peak = FindPeak(data, info);
+
+                if (peak < 0.000001)
+                    throw new InvalidOperationException("此檔案幾乎是靜音，無法正規化。");
+
+                double gain = targetPeak / peak;
+
+                int frames = data.Length / info.BlockAlign;
+
+                for (int f = 0; f < frames; f++)
+                    ApplyGainToFrame(data, f * info.BlockAlign, info, gain);
+
+                Buffer.BlockCopy(data, 0, file, (int)info.DataOffset, data.Length);
+                File.WriteAllBytes(output, file);
+            }
+
+            private static void EnsureEditable(WaveInfo info)
+            {
+                if (info.AudioFormat != 1 && info.AudioFormat != 3)
+                    throw new InvalidOperationException("目前只支援 PCM 或 32-bit IEEE Float WAV 編輯。");
+
+                if (info.AudioFormat == 3 && info.BitsPerSample != 32)
+                    throw new InvalidOperationException("Float WAV 目前只支援 32-bit。");
+
+                if (info.BitsPerSample != 8 &&
+                    info.BitsPerSample != 16 &&
+                    info.BitsPerSample != 24 &&
+                    info.BitsPerSample != 32)
+                {
+                    throw new InvalidOperationException("不支援的位元深度：" + info.BitsPerSample);
+                }
+
+                if (info.BlockAlign <= 0 || info.Channels <= 0 || info.DataBytes <= 0)
+                    throw new InvalidOperationException("WAV 資料不完整，無法編輯。");
+            }
+
+            private static void EnsureSmallEnough(WaveInfo info)
+            {
+                if (info.DataOffset > int.MaxValue || info.DataBytes > int.MaxValue)
+                    throw new InvalidOperationException("檔案太大，這個內建編輯器無法一次載入。");
+            }
+
+            private static double FindPeak(byte[] data, WaveInfo info)
+            {
+                double peak = 0;
+                int frames = data.Length / info.BlockAlign;
+                int bytesPerSample = info.BitsPerSample / 8;
+
+                for (int f = 0; f < frames; f++)
+                {
+                    int frameOffset = f * info.BlockAlign;
+
+                    for (int ch = 0; ch < info.Channels; ch++)
+                    {
+                        int offset = frameOffset + ch * bytesPerSample;
+
+                        if (offset + bytesPerSample > data.Length)
+                            continue;
+
+                        double value = Math.Abs(ReadSample(data, offset, info));
+
+                        if (value > peak)
+                            peak = value;
+                    }
+                }
+
+                return peak;
+            }
+
+            private static void ApplyGainToFrame(byte[] data, int frameOffset, WaveInfo info, double gain)
+            {
+                int bytesPerSample = info.BitsPerSample / 8;
+
+                for (int ch = 0; ch < info.Channels; ch++)
+                {
+                    int offset = frameOffset + ch * bytesPerSample;
+
+                    if (offset + bytesPerSample > data.Length)
+                        continue;
+
+                    double sample = ReadSample(data, offset, info);
+                    WriteSample(data, offset, info, sample * gain);
+                }
+            }
+
+            private static double ReadSample(byte[] data, int offset, WaveInfo info)
+            {
+                if (info.AudioFormat == 3 && info.BitsPerSample == 32)
+                    return BitConverter.ToSingle(data, offset);
+
+                if (info.BitsPerSample == 8)
+                    return (data[offset] - 128) / 128.0;
+
+                if (info.BitsPerSample == 16)
+                    return BitConverter.ToInt16(data, offset) / 32768.0;
+
+                if (info.BitsPerSample == 24)
+                {
+                    int value =
+                        data[offset] |
+                        (data[offset + 1] << 8) |
+                        (data[offset + 2] << 16);
+
+                    if ((value & 0x800000) != 0)
+                        value |= unchecked((int)0xFF000000);
+
+                    return value / 8388608.0;
+                }
+
+                if (info.BitsPerSample == 32)
+                    return BitConverter.ToInt32(data, offset) / 2147483648.0;
+
+                return 0;
+            }
+
+            private static void WriteSample(byte[] data, int offset, WaveInfo info, double sample)
+            {
+                if (sample > 1)
+                    sample = 1;
+
+                if (sample < -1)
+                    sample = -1;
+
+                if (info.AudioFormat == 3 && info.BitsPerSample == 32)
+                {
+                    byte[] bytes = BitConverter.GetBytes((float)sample);
+                    Buffer.BlockCopy(bytes, 0, data, offset, 4);
+                    return;
+                }
+
+                if (info.BitsPerSample == 8)
+                {
+                    int value = (int)Math.Round(sample * 127.0 + 128.0);
+                    value = Math.Max(0, Math.Min(255, value));
+                    data[offset] = (byte)value;
+                    return;
+                }
+
+                if (info.BitsPerSample == 16)
+                {
+                    short value = sample <= -1
+                        ? short.MinValue
+                        : (short)Math.Round(sample * short.MaxValue);
+
+                    byte[] bytes = BitConverter.GetBytes(value);
+                    data[offset] = bytes[0];
+                    data[offset + 1] = bytes[1];
+                    return;
+                }
+
+                if (info.BitsPerSample == 24)
+                {
+                    int value = sample <= -1
+                        ? -8388608
+                        : (int)Math.Round(sample * 8388607.0);
+
+                    data[offset] = (byte)(value & 0xFF);
+                    data[offset + 1] = (byte)((value >> 8) & 0xFF);
+                    data[offset + 2] = (byte)((value >> 16) & 0xFF);
+                    return;
+                }
+
+                if (info.BitsPerSample == 32)
+                {
+                    int value = sample <= -1
+                        ? int.MinValue
+                        : (int)Math.Round(sample * int.MaxValue);
+
+                    byte[] bytes = BitConverter.GetBytes(value);
+                    Buffer.BlockCopy(bytes, 0, data, offset, 4);
+                }
+            }
+        }
+
+        private class SeekEventArgs : EventArgs
+        {
+            public long PositionMs;
+
+            public SeekEventArgs(long positionMs)
+            {
+                PositionMs = positionMs;
+            }
+        }
+
+        private class WaveformView : Control
+        {
+            private float[] _peaks;
+            private long _durationMs;
+            private long _positionMs;
+
+            public event EventHandler<SeekEventArgs> SeekRequested;
+
+            public long PositionMs
+            {
+                get { return _positionMs; }
+                set
+                {
+                    _positionMs = value;
+                    Invalidate();
+                }
+            }
+
+            public WaveformView()
+            {
+                DoubleBuffered = true;
+                BackColor = AppColor.Card3;
+                Cursor = Cursors.Hand;
+            }
+
+            public void SetPeaks(float[] peaks, long durationMs)
+            {
+                _peaks = peaks;
+                _durationMs = durationMs;
+                _positionMs = 0;
+                Invalidate();
+            }
+
+            public float GetPeakAt(long positionMs)
+            {
+                if (_peaks == null || _peaks.Length == 0 || _durationMs <= 0)
+                    return 0.25f;
+
+                int index = (int)(positionMs * _peaks.Length / _durationMs);
+                index = Math.Max(0, Math.Min(_peaks.Length - 1, index));
+
+                return Math.Max(0.08f, _peaks[index]);
+            }
+
+            protected override void OnMouseDown(MouseEventArgs e)
+            {
+                base.OnMouseDown(e);
+
+                if (_durationMs <= 0 || Width <= 0)
+                    return;
+
+                long pos = (long)(_durationMs * (e.X / (double)Width));
+
+                if (SeekRequested != null)
+                    SeekRequested(this, new SeekEventArgs(pos));
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+                Rectangle area = ClientRectangle;
+                area.Inflate(-1, -1);
+
+                using (GraphicsPath path = Ui.RoundRect(area, 12))
+                using (SolidBrush bg = new SolidBrush(AppColor.Card3))
+                {
+                    e.Graphics.FillPath(bg, path);
+                }
+
+                if (_peaks == null)
+                {
+                    DrawCenterText(e.Graphics, "波形載入中 / 尚未播放");
+                    return;
+                }
+
+                if (_peaks.Length == 0)
+                {
+                    DrawCenterText(e.Graphics, "此 WAV 無法產生波形預覽");
+                    return;
+                }
+
+                int mid = Height / 2;
+                int usableHeight = Math.Max(8, Height - 18);
+                float xStep = Width / (float)_peaks.Length;
+
+                using (Pen p = new Pen(AppColor.Accent2, Math.Max(1f, xStep)))
+                {
+                    for (int i = 0; i < _peaks.Length; i++)
+                    {
+                        float peak = Math.Max(0.02f, _peaks[i]);
+                        float x = i * xStep;
+                        int h = (int)(peak * usableHeight / 2);
+                        e.Graphics.DrawLine(p, x, mid - h, x, mid + h);
+                    }
+                }
+
+                if (_durationMs > 0)
+                {
+                    float progressX = (float)(Width * (_positionMs / (double)_durationMs));
+
+                    using (SolidBrush overlay = new SolidBrush(Color.FromArgb(60, 255, 255, 255)))
+                        e.Graphics.FillRectangle(overlay, 0, 0, progressX, Height);
+
+                    using (Pen p = new Pen(Color.White, 2))
+                        e.Graphics.DrawLine(p, progressX, 6, progressX, Height - 6);
+                }
+            }
+
+            private void DrawCenterText(Graphics g, string text)
+            {
+                TextRenderer.DrawText(
+                    g,
+                    text,
+                    Font,
+                    ClientRectangle,
+                    AppColor.SubText,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
+                );
+            }
+        }
+
+        private class VisualizerView : Control
+        {
+            private readonly Random _rng = new Random();
+            private float _level;
+
+            public float Level
+            {
+                get { return _level; }
+                set
+                {
+                    _level = Math.Max(0, Math.Min(1, value));
+                    Invalidate();
+                }
+            }
+
+            public VisualizerView()
+            {
+                DoubleBuffered = true;
+                BackColor = AppColor.Card3;
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+                Rectangle area = ClientRectangle;
+                area.Inflate(-1, -1);
+
+                using (GraphicsPath path = Ui.RoundRect(area, 12))
+                using (SolidBrush bg = new SolidBrush(AppColor.Card3))
+                    e.Graphics.FillPath(bg, path);
+
+                int bars = 22;
+                int gap = 4;
+                int barWidth = Math.Max(3, (Width - gap * (bars + 1)) / bars);
+                int maxH = Math.Max(8, Height - 20);
+
+                for (int i = 0; i < bars; i++)
+                {
+                    float randomPart = (float)_rng.NextDouble();
+                    float v = _level <= 0.01f ? 0.05f : (_level * 0.45f + randomPart * _level * 0.75f);
+                    int h = Math.Max(4, (int)(v * maxH));
+                    int x = gap + i * (barWidth + gap);
+                    int y = Height - 10 - h;
+
+                    Color color = Color.FromArgb(
+                        210,
+                        80 + Math.Min(120, i * 5),
+                        130,
+                        255
+                    );
+
+                    using (SolidBrush b = new SolidBrush(color))
+                        e.Graphics.FillRectangle(b, x, y, barWidth, h);
+                }
+
+                TextRenderer.DrawText(
+                    e.Graphics,
+                    "LIVE",
+                    new Font("Microsoft JhengHei UI", 8F, FontStyle.Bold),
+                    new Rectangle(8, 6, Width - 16, 18),
+                    AppColor.SubText,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter
+                );
+            }
+        }
+
+        private class MiniBarChart : Control
+        {
+            private Dictionary<string, int> _data = new Dictionary<string, int>();
+            private string _title = "";
+
+            public MiniBarChart()
+            {
+                DoubleBuffered = true;
+                BackColor = AppColor.Card;
+            }
+
+            public void SetData(Dictionary<string, int> data, string title)
+            {
+                _data = data ?? new Dictionary<string, int>();
+                _title = title ?? "";
+                Invalidate();
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+                Rectangle rect = ClientRectangle;
+                rect.Inflate(-1, -1);
+
+                using (GraphicsPath path = Ui.RoundRect(rect, 18))
+                using (SolidBrush bg = new SolidBrush(AppColor.Card))
+                using (Pen border = new Pen(AppColor.Border))
+                {
+                    e.Graphics.FillPath(bg, path);
+                    e.Graphics.DrawPath(border, path);
+                }
+
+                Rectangle titleRect = new Rectangle(22, 14, Width - 44, 28);
+
+                TextRenderer.DrawText(
+                    e.Graphics,
+                    _title,
+                    new Font("Microsoft JhengHei UI", 12F, FontStyle.Bold),
+                    titleRect,
+                    AppColor.Text,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter
+                );
+
+                if (_data == null || _data.Count == 0)
+                {
+                    TextRenderer.DrawText(
+                        e.Graphics,
+                        "目前沒有資料",
+                        Font,
+                        ClientRectangle,
+                        AppColor.SubText,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
+                    );
+                    return;
+                }
+
+                int max = Math.Max(1, _data.Values.Max());
+                int top = 60;
+                int left = 24;
+                int right = Width - 24;
+                int bottom = Height - 24;
+                int barAreaWidth = right - left;
+                int rowHeight = 34;
+
+                int i = 0;
+
+                foreach (var pair in _data.Take(8))
+                {
+                    int y = top + i * rowHeight;
+
+                    if (y + rowHeight > bottom)
+                        break;
+
+                    int barWidth = (int)(barAreaWidth * (pair.Value / (double)max));
+
+                    Rectangle barRect = new Rectangle(left, y + 7, Math.Max(4, barWidth), 18);
+
+                    using (LinearGradientBrush brush = new LinearGradientBrush(barRect, AppColor.Accent, AppColor.Accent2, LinearGradientMode.Horizontal))
+                        e.Graphics.FillRectangle(brush, barRect);
+
+                    TextRenderer.DrawText(
+                        e.Graphics,
+                        pair.Key + "　" + pair.Value,
+                        Font,
+                        new Rectangle(left + 8, y, barAreaWidth - 16, rowHeight),
+                        Color.White,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+                    );
+
+                    i++;
+                }
+            }
+        }
+
+        private class ModernButton : Button
+        {
+            public bool Primary = false;
+            private bool _hover = false;
+            private bool _down = false;
+
+            public ModernButton()
+            {
+                FlatStyle = FlatStyle.Flat;
+                FlatAppearance.BorderSize = 0;
+                ForeColor = Color.White;
+                BackColor = Color.Transparent;
+                Cursor = Cursors.Hand;
+                DoubleBuffered = true;
+            }
+
+            protected override void OnMouseEnter(EventArgs e)
+            {
+                _hover = true;
+                Invalidate();
+                base.OnMouseEnter(e);
+            }
+
+            protected override void OnMouseLeave(EventArgs e)
+            {
+                _hover = false;
+                _down = false;
+                Invalidate();
+                base.OnMouseLeave(e);
+            }
+
+            protected override void OnMouseDown(MouseEventArgs mevent)
+            {
+                _down = true;
+                Invalidate();
+                base.OnMouseDown(mevent);
+            }
+
+            protected override void OnMouseUp(MouseEventArgs mevent)
+            {
+                _down = false;
+                Invalidate();
+                base.OnMouseUp(mevent);
+            }
+
+            protected override void OnPaint(PaintEventArgs pevent)
+            {
+                pevent.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+                Rectangle rect = ClientRectangle;
+                rect.Inflate(-1, -1);
+
+                Color c1 = Primary ? AppColor.Accent : AppColor.Button;
+                Color c2 = Primary ? AppColor.Accent2 : AppColor.Button2;
+
+                if (_hover)
+                {
+                    c1 = Ui.Lighten(c1, 20);
+                    c2 = Ui.Lighten(c2, 20);
+                }
+
+                if (_down)
+                {
+                    c1 = Ui.Darken(c1, 20);
+                    c2 = Ui.Darken(c2, 20);
+                }
+
+                using (GraphicsPath path = Ui.RoundRect(rect, 13))
+                using (LinearGradientBrush b = new LinearGradientBrush(rect, c1, c2, LinearGradientMode.Horizontal))
+                {
+                    pevent.Graphics.FillPath(b, path);
+                }
+
+                TextRenderer.DrawText(
+                    pevent.Graphics,
+                    Text,
+                    Font,
+                    rect,
+                    Color.White,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+                );
+            }
+        }
+
+        private class CardPanel : Panel
+        {
+            public int Radius = 22;
+
+            public CardPanel()
+            {
+                DoubleBuffered = true;
+                BackColor = Color.Transparent;
+                Padding = new Padding(1);
+            }
+
+            protected override void OnPaintBackground(PaintEventArgs e)
+            {
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+                Rectangle rect = ClientRectangle;
+                rect.Inflate(-1, -1);
+
+                using (GraphicsPath path = Ui.RoundRect(rect, Radius))
+                using (SolidBrush b = new SolidBrush(AppColor.Card))
+                using (Pen p = new Pen(AppColor.Border))
+                {
+                    e.Graphics.FillPath(b, path);
+                    e.Graphics.DrawPath(p, path);
+                }
+
+                base.OnPaint(e);
+            }
+        }
+
+        private class GradientPanel : Panel
+        {
+            public Color Color1 = AppColor.Accent;
+            public Color Color2 = AppColor.Accent2;
+            public int Radius = 22;
+
+            public GradientPanel()
+            {
+                DoubleBuffered = true;
+                BackColor = Color.Transparent;
+            }
+
+            protected override void OnPaintBackground(PaintEventArgs e)
+            {
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+                Rectangle rect = ClientRectangle;
+                rect.Inflate(-1, -1);
+
+                using (GraphicsPath path = Ui.RoundRect(rect, Radius))
+                using (LinearGradientBrush b = new LinearGradientBrush(rect, Color1, Color2, LinearGradientMode.Horizontal))
+                {
+                    e.Graphics.FillPath(b, path);
+                }
+
+                base.OnPaint(e);
+            }
+        }
+
+        private static class Ui
+        {
+            public static GraphicsPath RoundRect(Rectangle rect, int radius)
+            {
+                GraphicsPath path = new GraphicsPath();
+
+                int d = radius * 2;
+
+                if (d > rect.Width)
+                    d = rect.Width;
+
+                if (d > rect.Height)
+                    d = rect.Height;
+
+                path.AddArc(rect.X, rect.Y, d, d, 180, 90);
+                path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
+                path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
+                path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
+                path.CloseFigure();
+
+                return path;
+            }
+
+            public static Color Lighten(Color c, int amount)
+            {
+                return Color.FromArgb(
+                    c.A,
+                    Math.Min(255, c.R + amount),
+                    Math.Min(255, c.G + amount),
+                    Math.Min(255, c.B + amount)
+                );
+            }
+
+            public static Color Darken(Color c, int amount)
+            {
+                return Color.FromArgb(
+                    c.A,
+                    Math.Max(0, c.R - amount),
+                    Math.Max(0, c.G - amount),
+                    Math.Max(0, c.B - amount)
+                );
+            }
+        }
+
+        private static class AppColor
+        {
+            public static readonly Color Bg = Color.FromArgb(15, 18, 28);
+            public static readonly Color Card = Color.FromArgb(25, 30, 45);
+            public static readonly Color Card2 = Color.FromArgb(31, 37, 55);
+            public static readonly Color Card3 = Color.FromArgb(38, 45, 65);
+            public static readonly Color Input = Color.FromArgb(20, 24, 36);
+            public static readonly Color Border = Color.FromArgb(55, 63, 85);
+
+            public static readonly Color Text = Color.FromArgb(235, 238, 248);
+            public static readonly Color SubText = Color.FromArgb(160, 170, 195);
+
+            public static readonly Color Accent = Color.FromArgb(91, 118, 255);
+            public static readonly Color Accent2 = Color.FromArgb(84, 210, 255);
+            public static readonly Color Button = Color.FromArgb(52, 61, 86);
+            public static readonly Color Button2 = Color.FromArgb(42, 49, 70);
+            public static readonly Color Selected = Color.FromArgb(68, 86, 145);
+            public static readonly Color Warning = Color.FromArgb(255, 205, 85);
         }
     }
 }
