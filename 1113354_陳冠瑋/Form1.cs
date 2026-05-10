@@ -558,6 +558,14 @@ namespace _1113354_陳冠瑋
             root.Controls.Add(mLblStatus, 0, 3);
             root.SetColumnSpan(mLblStatus, 2);
 
+            ToolTip toolTip = new ToolTip();
+            toolTip.SetToolTip(mBtnPrev, "上一首");
+            toolTip.SetToolTip(mBtnPlay, "播放");
+            toolTip.SetToolTip(mBtnPause, "暫停 / 繼續");
+            toolTip.SetToolTip(mBtnStop, "停止");
+            toolTip.SetToolTip(mBtnNext, "下一首");
+            toolTip.SetToolTip(mBtnMute, "切換靜音");
+
             mTimer = new Timer();
             mTimer.Interval = 160;
             mTimer.Tick += UiTimer_Tick;
@@ -1602,9 +1610,15 @@ namespace _1113354_陳冠瑋
             string mode = GetModeSafe();
 
             if (mode == "playing")
-                mBtnPause.Text = "⏸";
+            {
+                if (mBtnPause.Text != "⏸")
+                    mBtnPause.Text = "⏸";
+            }
             else if (mode == "paused")
-                mBtnPause.Text = "▶";
+            {
+                if (mBtnPause.Text != "▶")
+                    mBtnPause.Text = "▶";
+            }
 
             if (mVisualizer != null)
             {
@@ -2074,7 +2088,11 @@ namespace _1113354_陳冠瑋
         private void UpdateTimeDisplay(long posMs, long totalMs)
         {
             if (mLblTime != null)
-                mLblTime.Text = FormatTime(posMs) + " / " + FormatTime(totalMs);
+            {
+                string newText = FormatTime(posMs) + " / " + FormatTime(totalMs);
+                if (mLblTime.Text != newText)
+                    mLblTime.Text = newText;
+            }
         }
 
         private static string FormatTime(long ms)
