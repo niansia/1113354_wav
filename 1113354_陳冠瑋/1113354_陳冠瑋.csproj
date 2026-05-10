@@ -6,8 +6,8 @@
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <ProjectGuid>{F7A44815-1C8E-4A30-898E-CDFF94F0B015}</ProjectGuid>
     <OutputType>WinExe</OutputType>
-    <RootNamespace>_1113354_陳冠瑋</RootNamespace>
-    <AssemblyName>1113354_陳冠瑋</AssemblyName>
+    <RootNamespace>_1113354_���a޳</RootNamespace>
+    <AssemblyName>1113354_���a޳</AssemblyName>
     <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
@@ -33,7 +33,7 @@
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="System" />
+    <Reference Include="NAudio"><HintPath>packages\NAudio.2.2.1\lib\net472\NAudio.dll</HintPath></Reference><Reference Include="NAudio.Core"><HintPath>packages\NAudio.Core.2.2.1\lib\netstandard2.0\NAudio.Core.dll</HintPath></Reference><Reference Include="NAudio.WinMM"><HintPath>packages\NAudio.WinMM.2.2.1\lib\netstandard2.0\NAudio.WinMM.dll</HintPath></Reference><Reference Include="NAudio.Wasapi"><HintPath>packages\NAudio.Wasapi.2.2.1\lib\netstandard2.0\NAudio.Wasapi.dll</HintPath></Reference><Reference Include="NAudio.WinForms"><HintPath>packages\NAudio.WinForms.2.2.1\lib\net472\NAudio.WinForms.dll</HintPath></Reference><Reference Include="Microsoft.Win32.Registry"><HintPath>packages\Microsoft.Win32.Registry.4.7.0\lib\net461\Microsoft.Win32.Registry.dll</HintPath></Reference><Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Xml.Linq" />
     <Reference Include="System.Data.DataSetExtensions" />
@@ -63,6 +63,7 @@
       <AutoGen>True</AutoGen>
       <DependentUpon>Resources.resx</DependentUpon>
     </Compile>
+    <None Include="packages.config" />
     <None Include="Properties\Settings.settings">
       <Generator>SettingsSingleFileGenerator</Generator>
       <LastGenOutput>Settings.Designer.cs</LastGenOutput>
