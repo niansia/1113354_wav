@@ -21,6 +21,8 @@ namespace _1113354_陳冠瑋
         private static extern bool mciGetErrorString(int errorCode, StringBuilder errorText, int errorTextSize);
 
         private const string MciAlias = "wav_player";
+        private static readonly string[] SupportedAudioExtensions = new string[] { ".wav", ".mp3", ".mp4" };
+        private const string SupportedAudioFilter = "支援音訊/影片檔 (*.wav;*.mp3;*.mp4)|*.wav;*.mp3;*.mp4|WAV 檔案 (*.wav)|*.wav|MP3 檔案 (*.mp3)|*.mp3|MP4 影片/音訊 (*.mp4)|*.mp4|所有檔案 (*.*)|*.*";
 
         private readonly List<TrackItem> _tracks = new List<TrackItem>();
         private readonly HashSet<string> _favoritePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -30,6 +32,9 @@ namespace _1113354_陳冠瑋
         private FileSystemWatcher _watcher;
 
         private bool _mciOpen = false;
+        private bool _useWmp = false;
+        private bool _wmpOpen = false;
+        private object _wmpPlayer = null;
         private bool _playRequested = false;
         private bool _isSeeking = false;
         private bool _muted = false;
@@ -114,7 +119,7 @@ namespace _1113354_陳冠瑋
 
             Controls.Clear();
 
-            Text = "WAV播放器";
+            Text = "音訊播放器";
             Size = new Size(1180, 760);
             MinimumSize = new Size(1000, 650);
             StartPosition = FormStartPosition.CenterScreen;
@@ -162,10 +167,10 @@ namespace _1113354_陳冠瑋
             headerLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
             header.Controls.Add(headerLayout);
 
-            mLblTitle = MakeLabel("WAV播放器", 24, FontStyle.Bold, Color.White);
+            mLblTitle = MakeLabel("音訊播放器", 24, FontStyle.Bold, Color.White);
             mLblTitle.Dock = DockStyle.Fill;
 
-            mLblSubtitle = MakeLabel("播放清單｜波形圖｜A/B 循環｜音訊工具箱｜統計儀表板｜WAV 編輯工具", 10, FontStyle.Regular, Color.FromArgb(230, 235, 255));
+            mLblSubtitle = MakeLabel("播放清單｜MP3/MP4/WAV｜波形圖｜A/B 循環｜音訊工具箱｜統計儀表板", 10, FontStyle.Regular, Color.FromArgb(230, 235, 255));
             mLblSubtitle.Dock = DockStyle.Fill;
 
             mLblStats = MakeLabel("0 首｜00:00｜收藏 0", 11, FontStyle.Bold, Color.White);
@@ -211,7 +216,7 @@ namespace _1113354_陳冠瑋
             Label sideTitle = MakeLabel("音樂庫", 14, FontStyle.Bold, AppColor.Text);
             side.Controls.Add(sideTitle, 0, 0);
 
-            mBtnAddFiles = MakeButton("＋ 加入 WAV 檔案", true);
+            mBtnAddFiles = MakeButton("＋ 加入音訊/影片", true);
             mBtnAddFolder = MakeButton("＋ 加入整個資料夾", false);
             mBtnWatchFolder = MakeButton("◎ 監看資料夾", false);
             mBtnStopWatch = MakeButton("停止監看", false);
@@ -393,7 +398,7 @@ namespace _1113354_陳冠瑋
             mVisualizer.Margin = new Padding(0, 4, 16, 0);
             player.Controls.Add(mVisualizer, 1, 1);
 
-            mLblSelectedInfo = MakeLabel("WAV 資訊：尚未選取檔案", 9, FontStyle.Regular, AppColor.SubText);
+            mLblSelectedInfo = MakeLabel("檔案資訊：尚未選取檔案", 9, FontStyle.Regular, AppColor.SubText);
             mLblSelectedInfo.Dock = DockStyle.Fill;
             mLblSelectedInfo.TextAlign = ContentAlignment.MiddleLeft;
             player.Controls.Add(mLblSelectedInfo, 2, 1);
@@ -547,7 +552,7 @@ namespace _1113354_陳冠瑋
             player.Controls.Add(sliders, 0, 4);
             player.SetColumnSpan(sliders, 3);
 
-            mLblStatus = MakeLabel("就緒。可拖曳 WAV 檔或資料夾進來。", 9, FontStyle.Regular, AppColor.SubText);
+            mLblStatus = MakeLabel("就緒。可拖曳 WAV / MP3 / MP4 檔或資料夾進來。", 9, FontStyle.Regular, AppColor.SubText);
             mLblStatus.Dock = DockStyle.Fill;
             mLblStatus.TextAlign = ContentAlignment.MiddleLeft;
             root.Controls.Add(mLblStatus, 0, 3);
@@ -618,8 +623,8 @@ namespace _1113354_陳冠瑋
         {
             using (OpenFileDialog ofd = new OpenFileDialog())
             {
-                ofd.Title = "選擇 WAV 檔案";
-                ofd.Filter = "WAV 音效檔 (*.wav)|*.wav";
+                ofd.Title = "選擇 WAV / MP3 / MP4 檔案";
+                ofd.Filter = SupportedAudioFilter;
                 ofd.Multiselect = true;
 
                 if (ofd.ShowDialog() == DialogResult.OK)
@@ -631,7 +636,7 @@ namespace _1113354_陳冠瑋
         {
             using (FolderBrowserDialog fbd = new FolderBrowserDialog())
             {
-                fbd.Description = "選擇包含 WAV 的資料夾，會自動掃描子資料夾";
+                fbd.Description = "選擇包含 WAV / MP3 / MP4 的資料夾，會自動掃描子資料夾";
 
                 if (fbd.ShowDialog() == DialogResult.OK)
                     AddFilesToPlaylist(new string[] { fbd.SelectedPath }, true);
@@ -651,7 +656,7 @@ namespace _1113354_陳冠瑋
                     continue;
 
                 if (Directory.Exists(raw))
-                    expanded.AddRange(SafeEnumerateWavFiles(raw));
+                    expanded.AddRange(SafeEnumerateAudioFiles(raw));
                 else
                     expanded.Add(raw);
             }
@@ -667,7 +672,7 @@ namespace _1113354_陳冠瑋
                     continue;
                 }
 
-                if (!string.Equals(Path.GetExtension(rawPath), ".wav", StringComparison.OrdinalIgnoreCase))
+                if (!IsSupportedAudioFile(rawPath))
                 {
                     skipped++;
                     continue;
@@ -701,24 +706,27 @@ namespace _1113354_陳冠瑋
                 SelectTrack(_tracks[0]);
 
             if (showMessage)
-                SetStatus("已加入 " + added + " 個 WAV 檔案，略過 " + skipped + " 個項目。");
+                SetStatus("已加入 " + added + " 個音訊/影片檔案，略過 " + skipped + " 個項目。");
         }
 
-        private IEnumerable<string> SafeEnumerateWavFiles(string folder)
+        private IEnumerable<string> SafeEnumerateAudioFiles(string folder)
         {
             string[] files = new string[0];
             string[] dirs = new string[0];
 
             try
             {
-                files = Directory.GetFiles(folder, "*.wav");
+                files = Directory.GetFiles(folder, "*.*");
             }
             catch
             {
             }
 
             foreach (string file in files)
-                yield return file;
+            {
+                if (IsSupportedAudioFile(file))
+                    yield return file;
+            }
 
             try
             {
@@ -730,7 +738,7 @@ namespace _1113354_陳冠瑋
 
             foreach (string dir in dirs)
             {
-                foreach (string file in SafeEnumerateWavFiles(dir))
+                foreach (string file in SafeEnumerateAudioFiles(dir))
                     yield return file;
             }
         }
@@ -771,9 +779,9 @@ namespace _1113354_陳冠瑋
                 item.SubItems.Add(track.FileName);
                 item.SubItems.Add(FormatTime(track.DurationMs));
                 item.SubItems.Add(track.FormatName);
-                item.SubItems.Add(track.SampleRate + " Hz");
-                item.SubItems.Add(track.Channels.ToString());
-                item.SubItems.Add(track.BitsPerSample + " bit");
+                item.SubItems.Add(track.SampleRateText);
+                item.SubItems.Add(track.ChannelsText);
+                item.SubItems.Add(track.BitsText);
                 item.SubItems.Add(FormatBytes(track.FileSize));
                 item.SubItems.Add(track.Path);
 
@@ -835,7 +843,7 @@ namespace _1113354_陳冠瑋
                 return;
             }
 
-            SetStatus("請先加入 WAV 檔案。");
+            SetStatus("請先加入 WAV / MP3 / MP4 檔案。");
         }
 
         private void PlayTrack(TrackItem track)
@@ -853,22 +861,24 @@ namespace _1113354_陳冠瑋
             {
                 CloseMci();
 
-                bool opened = RunMci("open " + Quote(track.Path) + " type waveaudio alias " + MciAlias, false);
+                if (ShouldUseWmpPlayback(track.Path))
+                    OpenWmpFile(track.Path);
+                else
+                    OpenMciFile(track.Path);
 
-                if (!opened)
-                    RunMci("open " + Quote(track.Path) + " alias " + MciAlias, true);
+                long playerLength = GetLengthSafe();
+                _durationMs = playerLength > 0 ? playerLength : track.DurationMs;
 
-                _mciOpen = true;
-
-                RunMci("set " + MciAlias + " time format milliseconds", false);
-
-                long mciLength = GetLengthSafe();
-                _durationMs = mciLength > 0 ? mciLength : track.DurationMs;
+                if (track.DurationMs <= 0 && _durationMs > 0)
+                    track.DurationMs = _durationMs;
 
                 ApplyVolume();
                 ApplySpeed();
 
-                RunMci("play " + MciAlias, true);
+                if (_useWmp)
+                    WmpPlay();
+                else
+                    RunMci("play " + MciAlias, true);
 
                 _currentTrack = track;
                 _playRequested = true;
@@ -891,6 +901,7 @@ namespace _1113354_陳冠瑋
             catch (Exception ex)
             {
                 _playRequested = false;
+                CloseMci();
                 MessageBox.Show("播放失敗：\n" + ex.Message, "錯誤", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -907,17 +918,28 @@ namespace _1113354_陳冠瑋
 
             if (mode == "playing")
             {
-                RunMci("pause " + MciAlias, false);
+                if (_useWmp)
+                    WmpPause();
+                else
+                    RunMci("pause " + MciAlias, false);
+
                 _playRequested = false;
                 mBtnPause.Text = "▶";
                 SetStatus("已暫停。");
             }
             else
             {
-                bool ok = RunMci("resume " + MciAlias, false);
+                if (_useWmp)
+                {
+                    WmpPlay();
+                }
+                else
+                {
+                    bool ok = RunMci("resume " + MciAlias, false);
 
-                if (!ok)
-                    RunMci("play " + MciAlias, false);
+                    if (!ok)
+                        RunMci("play " + MciAlias, false);
+                }
 
                 _playRequested = true;
                 mBtnPause.Text = "⏸";
@@ -929,8 +951,16 @@ namespace _1113354_陳冠瑋
         {
             if (_mciOpen)
             {
-                RunMci("stop " + MciAlias, false);
-                RunMci("seek " + MciAlias + " to start", false);
+                if (_useWmp)
+                {
+                    WmpStop();
+                    WmpSeekTo(0);
+                }
+                else
+                {
+                    RunMci("stop " + MciAlias, false);
+                    RunMci("seek " + MciAlias + " to start", false);
+                }
             }
 
             _playRequested = false;
@@ -1070,10 +1100,20 @@ namespace _1113354_陳冠瑋
             if (_durationMs > 0 && targetMs > _durationMs)
                 targetMs = _durationMs;
 
-            RunMci("seek " + MciAlias + " to " + targetMs, false);
+            if (_useWmp)
+            {
+                WmpSeekTo(targetMs);
 
-            if (_playRequested || GetModeSafe() == "playing")
-                RunMci("play " + MciAlias, false);
+                if (_playRequested || GetModeSafe() == "playing")
+                    WmpPlay();
+            }
+            else
+            {
+                RunMci("seek " + MciAlias + " to " + targetMs, false);
+
+                if (_playRequested || GetModeSafe() == "playing")
+                    RunMci("play " + MciAlias, false);
+            }
 
             _lastPositionMs = targetMs;
             UpdateTimeDisplay(targetMs, _durationMs);
@@ -1179,6 +1219,13 @@ namespace _1113354_陳冠瑋
                 return;
 
             int volume = _muted ? 0 : mTrkVolume.Value;
+
+            if (_useWmp)
+            {
+                WmpSetVolume(volume);
+                return;
+            }
+
             RunMci("setaudio " + MciAlias + " volume to " + volume, false);
         }
 
@@ -1186,6 +1233,12 @@ namespace _1113354_陳冠瑋
         {
             if (!_mciOpen || mTrkSpeed == null)
                 return;
+
+            if (_useWmp)
+            {
+                WmpSetRate(mTrkSpeed.Value / 100.0);
+                return;
+            }
 
             int speed = mTrkSpeed.Value * 10;
             RunMci("set " + MciAlias + " speed " + speed, false);
@@ -1215,7 +1268,7 @@ namespace _1113354_陳冠瑋
             if (_tracks.Count == 0)
             {
                 mLblNow.Text = "尚未播放";
-                mLblSelectedInfo.Text = "WAV 資訊：尚未選取檔案";
+                mLblSelectedInfo.Text = "檔案資訊：尚未選取檔案";
                 mTxtPath.Clear();
                 UpdateTimeDisplay(0, 0);
                 mWaveform.SetPeaks(null, 0);
@@ -1245,7 +1298,7 @@ namespace _1113354_陳冠瑋
 
             mTxtPath.Clear();
             mLblNow.Text = "尚未播放";
-            mLblSelectedInfo.Text = "WAV 資訊：尚未選取檔案";
+            mLblSelectedInfo.Text = "檔案資訊：尚未選取檔案";
             mWaveform.SetPeaks(null, 0);
             mVisualizer.Level = 0;
 
@@ -1333,7 +1386,7 @@ namespace _1113354_陳冠瑋
             {
                 sfd.Title = "儲存播放清單";
                 sfd.Filter = "M3U 播放清單 (*.m3u)|*.m3u|文字檔 (*.txt)|*.txt";
-                sfd.FileName = "WAV播放器_Playlist.m3u";
+                sfd.FileName = "音訊播放器_Playlist.m3u";
 
                 if (sfd.ShowDialog() == DialogResult.OK)
                 {
@@ -1384,7 +1437,7 @@ namespace _1113354_陳冠瑋
         {
             using (FolderBrowserDialog fbd = new FolderBrowserDialog())
             {
-                fbd.Description = "選擇要監看的資料夾，新出現的 WAV 會自動加入播放清單";
+                fbd.Description = "選擇要監看的資料夾，新出現的 WAV / MP3 / MP4 會自動加入播放清單";
 
                 if (fbd.ShowDialog() == DialogResult.OK)
                     StartWatchingFolder(fbd.SelectedPath);
@@ -1398,7 +1451,7 @@ namespace _1113354_陳冠瑋
 
             StopWatchingFolder(false);
 
-            _watcher = new FileSystemWatcher(folder, "*.wav");
+            _watcher = new FileSystemWatcher(folder, "*.*");
             _watcher.IncludeSubdirectories = true;
             _watcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime | NotifyFilters.LastWrite;
             _watcher.Created += Watcher_FileAppeared;
@@ -1449,6 +1502,9 @@ namespace _1113354_陳冠瑋
 
         private void AddWatchedFileLater(string path)
         {
+            if (!IsSupportedAudioFile(path))
+                return;
+
             Task.Factory.StartNew(delegate
             {
                 System.Threading.Thread.Sleep(800);
@@ -1461,7 +1517,7 @@ namespace _1113354_陳冠瑋
                     BeginInvoke(new Action(delegate
                     {
                         AddFilesToPlaylist(new string[] { path }, false);
-                        SetStatus("監看資料夾偵測到新 WAV：" + Path.GetFileName(path));
+                        SetStatus("監看資料夾偵測到新檔案：" + Path.GetFileName(path));
                     }));
                 }
                 catch
@@ -1518,6 +1574,13 @@ namespace _1113354_陳冠瑋
             if (_durationMs <= 0)
                 _durationMs = GetLengthSafe();
 
+            if (_currentTrack != null && _currentTrack.DurationMs <= 0 && _durationMs > 0)
+            {
+                _currentTrack.DurationMs = _durationMs;
+                RefreshList();
+                UpdateStats();
+            }
+
             if (_loopA >= 0 && _loopB > _loopA && pos >= _loopB - 80)
             {
                 SeekTo(_loopA);
@@ -1555,6 +1618,13 @@ namespace _1113354_陳冠瑋
 
             bool reachedEnd = _durationMs > 0 &&
                               (pos >= _durationMs - 420 || _lastPositionMs >= _durationMs - 420);
+
+            if (_useWmp && _playRequested && GetWmpPlayState() == 8)
+            {
+                _lastPositionMs = 0;
+                HandleTrackEnded();
+                return;
+            }
 
             if (_playRequested && mode == "stopped" && reachedEnd)
             {
@@ -1597,6 +1667,9 @@ namespace _1113354_陳冠瑋
 
         private long GetLengthSafe()
         {
+            if (_useWmp)
+                return GetWmpDurationMs();
+
             long value;
 
             if (long.TryParse(QueryMci("status " + MciAlias + " length"), out value))
@@ -1607,6 +1680,14 @@ namespace _1113354_陳冠瑋
 
         private long GetPositionSafe()
         {
+            if (_useWmp)
+            {
+                if (GetWmpPlayState() == 8 && _durationMs > 0)
+                    return _durationMs;
+
+                return GetWmpPositionMs();
+            }
+
             long value;
 
             if (long.TryParse(QueryMci("status " + MciAlias + " position"), out value))
@@ -1617,6 +1698,22 @@ namespace _1113354_陳冠瑋
 
         private string GetModeSafe()
         {
+            if (_useWmp)
+            {
+                int state = GetWmpPlayState();
+
+                if (state == 3 || state == 6 || state == 9)
+                    return "playing";
+
+                if (state == 2)
+                    return "paused";
+
+                if (state == 1 || state == 8 || state == 10)
+                    return "stopped";
+
+                return "";
+            }
+
             string mode = QueryMci("status " + MciAlias + " mode");
 
             if (string.IsNullOrWhiteSpace(mode))
@@ -1629,14 +1726,278 @@ namespace _1113354_陳冠瑋
         {
             if (_mciOpen)
             {
-                RunMci("stop " + MciAlias, false);
-                RunMci("close " + MciAlias, false);
+                if (_useWmp || _wmpOpen)
+                {
+                    WmpStop();
+                    WmpSetUrl("");
+                }
+                else
+                {
+                    RunMci("stop " + MciAlias, false);
+                    RunMci("close " + MciAlias, false);
+                }
             }
 
             _mciOpen = false;
+            _useWmp = false;
+            _wmpOpen = false;
             _playRequested = false;
             _durationMs = 0;
             _lastPositionMs = 0;
+        }
+
+        private static bool ShouldUseWmpPlayback(string path)
+        {
+            string ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
+            return ext == ".mp3" || ext == ".mp4";
+        }
+
+        private void OpenMciFile(string path)
+        {
+            string ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
+            List<string> errors = new List<string>();
+            bool opened = false;
+
+            if (ext == ".wav")
+            {
+                opened = TryRunMci("open " + Quote(path) + " type waveaudio alias " + MciAlias, errors);
+
+                if (!opened)
+                    opened = TryRunMci("open " + Quote(path) + " alias " + MciAlias, errors);
+            }
+            else
+            {
+                opened = TryRunMci("open " + Quote(path) + " type mpegvideo alias " + MciAlias, errors);
+
+                if (!opened)
+                    opened = TryRunMci("open " + Quote(path) + " alias " + MciAlias, errors);
+            }
+
+            if (!opened)
+            {
+                string detail = errors.Count > 0 ? string.Join(Environment.NewLine + Environment.NewLine, errors.ToArray()) : "未知 MCI 錯誤。";
+                throw new InvalidOperationException("MCI 無法開啟這個檔案。" + Environment.NewLine + detail);
+            }
+
+            _useWmp = false;
+            _wmpOpen = false;
+            _mciOpen = true;
+            RunMci("set " + MciAlias + " time format milliseconds", false);
+        }
+
+        private void OpenWmpFile(string path)
+        {
+            EnsureWmpPlayer();
+            WmpSetUrl(path);
+            _useWmp = true;
+            _wmpOpen = true;
+            _mciOpen = true;
+        }
+
+        private object EnsureWmpPlayer()
+        {
+            if (_wmpPlayer != null)
+                return _wmpPlayer;
+
+            Type type = Type.GetTypeFromProgID("WMPlayer.OCX");
+
+            if (type == null)
+                throw new InvalidOperationException("找不到 Windows Media Player 元件。請確認 Windows 已啟用 Windows Media Player / Media Features。");
+
+            _wmpPlayer = Activator.CreateInstance(type);
+            return _wmpPlayer;
+        }
+
+        private void WmpSetUrl(string path)
+        {
+            if (_wmpPlayer == null)
+                return;
+
+            try
+            {
+                ComSet(_wmpPlayer, "URL", path);
+            }
+            catch
+            {
+            }
+        }
+
+        private object WmpControls()
+        {
+            return _wmpPlayer == null ? null : ComGet(_wmpPlayer, "controls");
+        }
+
+        private object WmpSettings()
+        {
+            return _wmpPlayer == null ? null : ComGet(_wmpPlayer, "settings");
+        }
+
+        private void WmpPlay()
+        {
+            try
+            {
+                object controls = WmpControls();
+
+                if (controls != null)
+                    ComCall(controls, "play");
+            }
+            catch
+            {
+            }
+        }
+
+        private void WmpPause()
+        {
+            try
+            {
+                object controls = WmpControls();
+
+                if (controls != null)
+                    ComCall(controls, "pause");
+            }
+            catch
+            {
+            }
+        }
+
+        private void WmpStop()
+        {
+            try
+            {
+                object controls = WmpControls();
+
+                if (controls != null)
+                    ComCall(controls, "stop");
+            }
+            catch
+            {
+            }
+        }
+
+        private void WmpSeekTo(long positionMs)
+        {
+            try
+            {
+                object controls = WmpControls();
+
+                if (controls != null)
+                    ComSet(controls, "currentPosition", positionMs / 1000.0);
+            }
+            catch
+            {
+            }
+        }
+
+        private long GetWmpPositionMs()
+        {
+            try
+            {
+                object controls = WmpControls();
+
+                if (controls == null)
+                    return 0;
+
+                object value = ComGet(controls, "currentPosition");
+                return (long)(Convert.ToDouble(value) * 1000.0);
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private long GetWmpDurationMs()
+        {
+            try
+            {
+                if (_wmpPlayer == null)
+                    return 0;
+
+                object media = ComGet(_wmpPlayer, "currentMedia");
+
+                if (media == null)
+                    return 0;
+
+                object value = ComGet(media, "duration");
+                return (long)(Convert.ToDouble(value) * 1000.0);
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private int GetWmpPlayState()
+        {
+            try
+            {
+                if (_wmpPlayer == null)
+                    return 0;
+
+                object value = ComGet(_wmpPlayer, "playState");
+                return Convert.ToInt32(value);
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private void WmpSetVolume(int mciVolume)
+        {
+            try
+            {
+                object settings = WmpSettings();
+
+                if (settings == null)
+                    return;
+
+                int volume = Math.Max(0, Math.Min(100, mciVolume / 10));
+                ComSet(settings, "volume", volume);
+                ComSet(settings, "mute", _muted);
+            }
+            catch
+            {
+            }
+        }
+
+        private void WmpSetRate(double rate)
+        {
+            try
+            {
+                object settings = WmpSettings();
+
+                if (settings != null)
+                    ComSet(settings, "rate", rate);
+            }
+            catch
+            {
+            }
+        }
+
+        private static object ComGet(object target, string name)
+        {
+            return target.GetType().InvokeMember(name, System.Reflection.BindingFlags.GetProperty, null, target, null);
+        }
+
+        private static void ComSet(object target, string name, object value)
+        {
+            target.GetType().InvokeMember(name, System.Reflection.BindingFlags.SetProperty, null, target, new object[] { value });
+        }
+
+        private static object ComCall(object target, string name, params object[] args)
+        {
+            return target.GetType().InvokeMember(name, System.Reflection.BindingFlags.InvokeMethod, null, target, args);
+        }
+
+        private static bool TryRunMci(string command, List<string> errors)
+        {
+            int error = mciSendString(command, null, 0, IntPtr.Zero);
+
+            if (error != 0 && errors != null)
+                errors.Add(GetMciError(error) + Environment.NewLine + "指令：" + command);
+
+            return error == 0;
         }
 
         private static bool RunMci(string command, bool throwOnError)
@@ -1673,6 +2034,25 @@ namespace _1113354_陳冠瑋
         private static string Quote(string path)
         {
             return "\"" + path.Replace("\"", "") + "\"";
+        }
+
+        private static bool IsSupportedAudioFile(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return false;
+
+            string ext = Path.GetExtension(path);
+
+            if (string.IsNullOrWhiteSpace(ext))
+                return false;
+
+            foreach (string supported in SupportedAudioExtensions)
+            {
+                if (string.Equals(ext, supported, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
         }
 
         private int MsToProgressValue(long ms)
@@ -1912,7 +2292,7 @@ namespace _1113354_陳冠瑋
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
             DialogResult result = MessageBox.Show(
-                "確定要關閉 WAV播放器 嗎？",
+                "確定要關閉 音訊播放器 嗎？",
                 "關閉確認",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Question
@@ -2031,7 +2411,7 @@ namespace _1113354_陳冠瑋
 
             private void BuildUI()
             {
-                Text = "WAV播放器 - 音訊工具箱";
+                Text = "音訊播放器 - 音訊工具箱";
                 Size = new Size(920, 620);
                 MinimumSize = new Size(820, 520);
                 StartPosition = FormStartPosition.CenterParent;
@@ -2086,7 +2466,7 @@ namespace _1113354_陳冠瑋
                 root.Controls.Add(_log, 0, 2);
 
                 WriteLog("音訊工具箱已啟動。");
-                WriteLog("目前播放清單：" + _host._tracks.Count + " 個 WAV 檔案。");
+                WriteLog("目前播放清單：" + _host._tracks.Count + " 個音訊/影片檔案。");
             }
 
             private Button MakeToolButton(string text, Action action)
@@ -2141,7 +2521,7 @@ namespace _1113354_陳冠瑋
 
             private void RunIntegrityCheck()
             {
-                WriteLog("開始檢查 WAV 完整性...");
+                WriteLog("開始檢查檔案完整性...");
 
                 int ok = 0;
                 int fail = 0;
@@ -2157,7 +2537,7 @@ namespace _1113354_陳冠瑋
 
                     try
                     {
-                        WaveInfo info = WaveInfo.Read(track.Path);
+                        AudioInfo info = AudioInfo.Read(track.Path);
 
                         if (info.DurationMs <= 0)
                         {
@@ -2192,7 +2572,7 @@ namespace _1113354_陳冠瑋
                 {
                     sfd.Title = "匯出 CSV 報表";
                     sfd.Filter = "CSV 檔案 (*.csv)|*.csv";
-                    sfd.FileName = "WAV播放器_音訊報表.csv";
+                    sfd.FileName = "音訊播放器_音訊報表.csv";
 
                     if (sfd.ShowDialog() != DialogResult.OK)
                         return;
@@ -2206,9 +2586,9 @@ namespace _1113354_陳冠瑋
                             Csv(t.FileName) + "," +
                             Csv(Form1.FormatTime(t.DurationMs)) + "," +
                             Csv(t.FormatName) + "," +
-                            Csv(t.SampleRate.ToString()) + "," +
-                            Csv(t.Channels.ToString()) + "," +
-                            Csv(t.BitsPerSample.ToString()) + "," +
+                            Csv(t.SampleRateText) + "," +
+                            Csv(t.ChannelsText) + "," +
+                            Csv(t.BitsText) + "," +
                             Csv(Form1.FormatBytes(t.FileSize)) + "," +
                             Csv(t.IsFavorite ? "是" : "否") + "," +
                             Csv(t.Path)
@@ -2232,7 +2612,7 @@ namespace _1113354_陳冠瑋
                 {
                     sfd.Title = "匯出 HTML 報表";
                     sfd.Filter = "HTML 檔案 (*.html)|*.html";
-                    sfd.FileName = "WAV播放器_音訊報表.html";
+                    sfd.FileName = "音訊播放器_音訊報表.html";
 
                     if (sfd.ShowDialog() != DialogResult.OK)
                         return;
@@ -2244,7 +2624,7 @@ namespace _1113354_陳冠瑋
 
                     sb.AppendLine("<!doctype html>");
                     sb.AppendLine("<html lang=\"zh-Hant\"><head><meta charset=\"utf-8\">");
-                    sb.AppendLine("<title>WAV播放器 音訊報表</title>");
+                    sb.AppendLine("<title>音訊播放器 音訊報表</title>");
                     sb.AppendLine("<style>");
                     sb.AppendLine("body{font-family:'Microsoft JhengHei',sans-serif;background:#0f121c;color:#ebeef8;padding:32px;}");
                     sb.AppendLine("h1{font-size:32px;margin-bottom:8px;}");
@@ -2254,7 +2634,7 @@ namespace _1113354_陳冠瑋
                     sb.AppendLine("th{color:#54d2ff;}");
                     sb.AppendLine(".sub{color:#a0aac3;}");
                     sb.AppendLine("</style></head><body>");
-                    sb.AppendLine("<h1>WAV播放器 音訊報表</h1>");
+                    sb.AppendLine("<h1>音訊播放器 音訊報表</h1>");
                     sb.AppendLine("<div class=\"sub\">產生時間：" + Html(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")) + "</div>");
                     sb.AppendLine("<div class=\"card\">");
                     sb.AppendLine("總檔案數：" + _host._tracks.Count + "<br>");
@@ -2270,9 +2650,9 @@ namespace _1113354_陳冠瑋
                         sb.AppendLine("<td>" + Html(t.FileName) + "</td>");
                         sb.AppendLine("<td>" + Html(Form1.FormatTime(t.DurationMs)) + "</td>");
                         sb.AppendLine("<td>" + Html(t.FormatName) + "</td>");
-                        sb.AppendLine("<td>" + Html(t.SampleRate + " Hz") + "</td>");
-                        sb.AppendLine("<td>" + Html(t.Channels.ToString()) + "</td>");
-                        sb.AppendLine("<td>" + Html(t.BitsPerSample + " bit") + "</td>");
+                        sb.AppendLine("<td>" + Html(t.SampleRateText) + "</td>");
+                        sb.AppendLine("<td>" + Html(t.ChannelsText) + "</td>");
+                        sb.AppendLine("<td>" + Html(t.BitsText) + "</td>");
                         sb.AppendLine("<td>" + Html(Form1.FormatBytes(t.FileSize)) + "</td>");
                         sb.AppendLine("<td>" + Html(t.IsFavorite ? "★" : "") + "</td>");
                         sb.AppendLine("<td>" + Html(t.Path) + "</td>");
@@ -2293,7 +2673,7 @@ namespace _1113354_陳冠瑋
 
                 if (t == null)
                 {
-                    WriteLog("請先選取或播放一個 WAV 檔案。");
+                    WriteLog("請先選取或播放一個音訊/影片檔案。");
                     return;
                 }
 
@@ -2352,7 +2732,7 @@ namespace _1113354_陳冠瑋
 
                 if (t == null)
                 {
-                    WriteLog("請先選取或播放一個 WAV 檔案。");
+                    WriteLog("請先選取或播放一個音訊/影片檔案。");
                     return;
                 }
 
@@ -2376,7 +2756,7 @@ namespace _1113354_陳冠瑋
 
                 if (t == null)
                 {
-                    WriteLog("請先選取或播放一個 WAV 檔案。");
+                    WriteLog("請先選取或播放一個音訊/影片檔案。");
                     return;
                 }
 
@@ -2400,7 +2780,7 @@ namespace _1113354_陳冠瑋
 
                 if (t == null)
                 {
-                    WriteLog("請先選取或播放一個 WAV 檔案。");
+                    WriteLog("請先選取或播放一個音訊/影片檔案。");
                     return;
                 }
 
@@ -2424,7 +2804,7 @@ namespace _1113354_陳冠瑋
 
                 if (t == null)
                 {
-                    WriteLog("請先選取或播放一個 WAV 檔案。");
+                    WriteLog("請先選取或播放一個音訊/影片檔案。");
                     return;
                 }
 
@@ -2479,7 +2859,7 @@ namespace _1113354_陳冠瑋
 
             private void BuildUI()
             {
-                Text = "WAV播放器 - 統計頁";
+                Text = "音訊播放器 - 統計頁";
                 Size = new Size(900, 620);
                 MinimumSize = new Size(780, 520);
                 StartPosition = FormStartPosition.CenterParent;
@@ -2541,8 +2921,8 @@ namespace _1113354_陳冠瑋
                 TrackItem longest = _host._tracks.OrderByDescending(t => t.DurationMs).FirstOrDefault();
                 TrackItem biggest = _host._tracks.OrderByDescending(t => t.FileSize).FirstOrDefault();
 
-                double avgRate = count == 0 ? 0 : _host._tracks.Average(t => t.SampleRate);
-                double avgBits = count == 0 ? 0 : _host._tracks.Average(t => t.BitsPerSample);
+                double avgRate = _host._tracks.Where(t => t.SampleRate > 0).Any() ? _host._tracks.Where(t => t.SampleRate > 0).Average(t => t.SampleRate) : 0;
+                double avgBits = _host._tracks.Where(t => t.BitsPerSample > 0).Any() ? _host._tracks.Where(t => t.BitsPerSample > 0).Average(t => t.BitsPerSample) : 0;
 
                 _summary.Text =
                     "總曲數 " + count +
@@ -2559,7 +2939,7 @@ namespace _1113354_陳冠瑋
 
                 StringBuilder sb = new StringBuilder();
 
-                sb.AppendLine("WAV播放器 統計摘要");
+                sb.AppendLine("音訊播放器 統計摘要");
                 sb.AppendLine("產生時間：" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
                 sb.AppendLine();
                 sb.AppendLine("總曲數：" + count);
@@ -2594,8 +2974,8 @@ namespace _1113354_陳冠瑋
                 sb.AppendLine();
                 sb.AppendLine("取樣率分布：");
 
-                foreach (var group in _host._tracks.GroupBy(t => t.SampleRate).OrderByDescending(g => g.Count()))
-                    sb.AppendLine("- " + group.Key + " Hz：" + group.Count() + " 個");
+                foreach (var group in _host._tracks.GroupBy(t => t.SampleRate > 0 ? t.SampleRate + " Hz" : "未知").OrderByDescending(g => g.Count()))
+                    sb.AppendLine("- " + group.Key + "：" + group.Count() + " 個");
 
                 _detail.Text = sb.ToString();
             }
@@ -2613,14 +2993,29 @@ namespace _1113354_陳冠瑋
             public long FileSize;
             public bool IsFavorite;
 
+            public string ChannelsText
+            {
+                get { return Channels > 0 ? Channels.ToString() : "-"; }
+            }
+
+            public string SampleRateText
+            {
+                get { return SampleRate > 0 ? SampleRate + " Hz" : "-"; }
+            }
+
+            public string BitsText
+            {
+                get { return BitsPerSample > 0 ? BitsPerSample + " bit" : "-"; }
+            }
+
             public string FullDescription
             {
                 get
                 {
                     return FormatName + "｜" +
-                           Channels + " 聲道｜" +
-                           SampleRate + " Hz｜" +
-                           BitsPerSample + " bit｜" +
+                           ChannelsText + " 聲道｜" +
+                           SampleRateText + "｜" +
+                           BitsText + "｜" +
                            FormatBytes(FileSize) + "｜" +
                            FormatTime(DurationMs);
                 }
@@ -2628,7 +3023,7 @@ namespace _1113354_陳冠瑋
 
             public static TrackItem FromFile(string path)
             {
-                WaveInfo info = WaveInfo.Read(path);
+                AudioInfo info = AudioInfo.Read(path);
                 FileInfo file = new FileInfo(path);
 
                 TrackItem item = new TrackItem();
@@ -2642,6 +3037,372 @@ namespace _1113354_陳冠瑋
                 item.FileSize = file.Length;
 
                 return item;
+            }
+        }
+
+        private class AudioInfo
+        {
+            public short Channels;
+            public int SampleRate;
+            public short BitsPerSample;
+            public long DurationMs;
+            public string FormatName;
+
+            public static AudioInfo Read(string path)
+            {
+                string ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
+
+                if (ext == ".wav")
+                {
+                    try
+                    {
+                        WaveInfo wav = WaveInfo.Read(path);
+
+                        AudioInfo result = new AudioInfo();
+                        result.Channels = wav.Channels;
+                        result.SampleRate = wav.SampleRate;
+                        result.BitsPerSample = wav.BitsPerSample;
+                        result.DurationMs = wav.DurationMs;
+                        result.FormatName = wav.FormatName;
+                        return result;
+                    }
+                    catch
+                    {
+                        // 非標準 WAV 或壓縮 WAV，改用 Windows Media Foundation 嘗試讀取。
+                    }
+                }
+
+                AudioInfo info = null;
+
+                try
+                {
+                    info = MediaFoundationAudio.ReadInfo(path);
+                }
+                catch
+                {
+                    info = new AudioInfo();
+                }
+
+                if (string.IsNullOrWhiteSpace(info.FormatName))
+                    info.FormatName = GuessFormatName(path);
+
+                if (info.DurationMs <= 0)
+                    info.DurationMs = SimpleAudioDuration.GetDurationMs(path);
+
+                if (info.DurationMs <= 0)
+                    info.DurationMs = MciAudioInfo.GetDurationMs(path);
+
+                return info;
+            }
+
+            public static string GuessFormatName(string path)
+            {
+                string ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
+
+                if (ext == ".wav")
+                    return "WAV";
+                if (ext == ".mp3")
+                    return "MP3";
+                if (ext == ".mp4")
+                    return "MP4 音訊/影片";
+
+                if (ext.Length > 1)
+                    return ext.Substring(1).ToUpperInvariant();
+
+                return "未知格式";
+            }
+        }
+
+        private static class SimpleAudioDuration
+        {
+            public static long GetDurationMs(string path)
+            {
+                string ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
+
+                if (ext == ".mp3")
+                    return GetMp3DurationMs(path);
+
+                if (ext == ".mp4" || ext == ".m4a")
+                    return GetMp4DurationMs(path);
+
+                return 0;
+            }
+
+            private static long GetMp3DurationMs(string path)
+            {
+                try
+                {
+                    using (FileStream fs = File.OpenRead(path))
+                    using (BinaryReader br = new BinaryReader(fs))
+                    {
+                        long start = SkipId3v2(br, fs.Length);
+                        fs.Position = start;
+
+                        while (fs.Position + 4 < fs.Length)
+                        {
+                            long framePos = fs.Position;
+                            uint header = ReadUInt32BE(br);
+
+                            if (IsValidMp3Header(header))
+                            {
+                                int bitRate = GetMp3BitRate(header);
+
+                                if (bitRate > 0)
+                                {
+                                    long audioBytes = Math.Max(0, fs.Length - framePos);
+                                    return audioBytes * 8L * 1000L / bitRate;
+                                }
+                            }
+
+                            fs.Position = framePos + 1;
+                        }
+                    }
+                }
+                catch
+                {
+                }
+
+                return 0;
+            }
+
+            private static long SkipId3v2(BinaryReader br, long length)
+            {
+                if (length < 10)
+                    return 0;
+
+                byte[] tag = br.ReadBytes(3);
+
+                if (tag.Length == 3 && tag[0] == 'I' && tag[1] == 'D' && tag[2] == '3')
+                {
+                    br.ReadByte();
+                    br.ReadByte();
+                    byte flags = br.ReadByte();
+                    byte[] sizeBytes = br.ReadBytes(4);
+
+                    if (sizeBytes.Length == 4)
+                    {
+                        int size = ((sizeBytes[0] & 0x7F) << 21) |
+                                   ((sizeBytes[1] & 0x7F) << 14) |
+                                   ((sizeBytes[2] & 0x7F) << 7) |
+                                   (sizeBytes[3] & 0x7F);
+
+                        long total = 10L + size;
+
+                        if ((flags & 0x10) != 0)
+                            total += 10;
+
+                        if (total < length)
+                            return total;
+                    }
+                }
+
+                return 0;
+            }
+
+            private static bool IsValidMp3Header(uint header)
+            {
+                if ((header & 0xFFE00000) != 0xFFE00000)
+                    return false;
+
+                int version = (int)((header >> 19) & 0x3);
+                int layer = (int)((header >> 17) & 0x3);
+                int bitrateIndex = (int)((header >> 12) & 0xF);
+                int sampleRateIndex = (int)((header >> 10) & 0x3);
+
+                return version != 1 && layer != 0 && bitrateIndex != 0 && bitrateIndex != 15 && sampleRateIndex != 3;
+            }
+
+            private static int GetMp3BitRate(uint header)
+            {
+                int version = (int)((header >> 19) & 0x3);
+                int layer = (int)((header >> 17) & 0x3);
+                int index = (int)((header >> 12) & 0xF);
+
+                int[] mpeg1Layer1 = { 0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0 };
+                int[] mpeg1Layer2 = { 0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0 };
+                int[] mpeg1Layer3 = { 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0 };
+                int[] mpeg2Layer1 = { 0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 0 };
+                int[] mpeg2Layer23 = { 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0 };
+
+                int kbps;
+
+                if (version == 3)
+                {
+                    if (layer == 3)
+                        kbps = mpeg1Layer1[index];
+                    else if (layer == 2)
+                        kbps = mpeg1Layer2[index];
+                    else
+                        kbps = mpeg1Layer3[index];
+                }
+                else
+                {
+                    if (layer == 3)
+                        kbps = mpeg2Layer1[index];
+                    else
+                        kbps = mpeg2Layer23[index];
+                }
+
+                return kbps * 1000;
+            }
+
+            private static long GetMp4DurationMs(string path)
+            {
+                try
+                {
+                    using (FileStream fs = File.OpenRead(path))
+                    using (BinaryReader br = new BinaryReader(fs))
+                    {
+                        return FindMp4Duration(br, fs.Length, 0);
+                    }
+                }
+                catch
+                {
+                    return 0;
+                }
+            }
+
+            private static long FindMp4Duration(BinaryReader br, long end, int depth)
+            {
+                Stream s = br.BaseStream;
+
+                while (s.Position + 8 <= end)
+                {
+                    long atomStart = s.Position;
+                    long size = ReadUInt32BE(br);
+                    string type = Encoding.ASCII.GetString(br.ReadBytes(4));
+
+                    if (size == 1 && s.Position + 8 <= end)
+                        size = ReadInt64BE(br);
+                    else if (size == 0)
+                        size = end - atomStart;
+
+                    if (size < 8)
+                        break;
+
+                    long atomEnd = Math.Min(end, atomStart + size);
+
+                    if (type == "mvhd")
+                    {
+                        byte version = br.ReadByte();
+                        br.ReadBytes(3);
+
+                        long timescale;
+                        long duration;
+
+                        if (version == 1)
+                        {
+                            br.ReadBytes(16);
+                            timescale = ReadUInt32BE(br);
+                            duration = ReadInt64BE(br);
+                        }
+                        else
+                        {
+                            br.ReadBytes(8);
+                            timescale = ReadUInt32BE(br);
+                            duration = ReadUInt32BE(br);
+                        }
+
+                        if (timescale > 0 && duration > 0)
+                            return duration * 1000L / timescale;
+                    }
+                    else if ((type == "moov" || type == "trak" || type == "mdia") && depth < 5)
+                    {
+                        long found = FindMp4Duration(br, atomEnd, depth + 1);
+
+                        if (found > 0)
+                            return found;
+                    }
+
+                    s.Position = atomEnd;
+                }
+
+                return 0;
+            }
+
+            private static uint ReadUInt32BE(BinaryReader br)
+            {
+                byte[] b = br.ReadBytes(4);
+
+                if (b.Length < 4)
+                    return 0;
+
+                return ((uint)b[0] << 24) | ((uint)b[1] << 16) | ((uint)b[2] << 8) | b[3];
+            }
+
+            private static long ReadInt64BE(BinaryReader br)
+            {
+                byte[] b = br.ReadBytes(8);
+
+                if (b.Length < 8)
+                    return 0;
+
+                return ((long)b[0] << 56) |
+                       ((long)b[1] << 48) |
+                       ((long)b[2] << 40) |
+                       ((long)b[3] << 32) |
+                       ((long)b[4] << 24) |
+                       ((long)b[5] << 16) |
+                       ((long)b[6] << 8) |
+                       b[7];
+            }
+        }
+
+        private static class MciAudioInfo
+        {
+            public static long GetDurationMs(string path)
+            {
+                string alias = "mciinfo" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                bool opened = false;
+
+                try
+                {
+                    opened = Send("open " + Quote(path) + " alias " + alias);
+
+                    if (!opened)
+                        opened = Send("open " + Quote(path) + " type mpegvideo alias " + alias);
+
+                    if (!opened)
+                        opened = Send("open " + Quote(path) + " type waveaudio alias " + alias);
+
+                    if (!opened)
+                        return 0;
+
+                    Send("set " + alias + " time format milliseconds");
+
+                    string lengthText = Query("status " + alias + " length");
+                    long length;
+
+                    if (long.TryParse(lengthText, out length))
+                        return length;
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    if (opened)
+                        Send("close " + alias);
+                }
+
+                return 0;
+            }
+
+            private static bool Send(string command)
+            {
+                int error = mciSendString(command, null, 0, IntPtr.Zero);
+                return error == 0;
+            }
+
+            private static string Query(string command)
+            {
+                StringBuilder buffer = new StringBuilder(512);
+                int error = mciSendString(command, buffer, buffer.Capacity, IntPtr.Zero);
+
+                if (error != 0)
+                    return "";
+
+                return buffer.ToString().Trim();
             }
         }
 
@@ -2666,7 +3427,7 @@ namespace _1113354_陳冠瑋
                     if (AudioFormat == 3)
                         return "IEEE Float";
 
-                    return "格式 " + AudioFormat;
+                    return "WAV 格式 " + AudioFormat;
                 }
             }
 
@@ -2742,6 +3503,490 @@ namespace _1113354_陳冠瑋
         {
             public static float[] BuildPeaks(string path, int desiredPeaks)
             {
+                string ext = System.IO.Path.GetExtension(path).ToLowerInvariant();
+
+                try
+                {
+                    if (ext == ".wav")
+                    {
+                        float[] wavPeaks = BuildWavPeaks(path, desiredPeaks);
+
+                        if (HasUsefulPeaks(wavPeaks))
+                            return wavPeaks;
+                    }
+
+                    // 第一優先：使用 Windows 內建 Media Foundation 嘗試解碼成 PCM，這是最接近真實聲音波形的方式。
+                    // 不需要安裝 NuGet 或第三方 DLL，但會受 Windows 系統解碼能力影響。
+                    float[] mfPeaks = MediaFoundationAudio.BuildPeaks(path, desiredPeaks);
+
+                    if (HasUsefulPeaks(mfPeaks))
+                        return mfPeaks;
+
+                    // 第二優先：有些電腦可以播放 MP3，但 Media Foundation SourceReader 不一定能把它轉成 PCM。
+                    // 這裡改用 MP3 frame energy 產生「預覽波形」，至少不會空白。
+                    if (ext == ".mp3")
+                        return BuildMp3FramePreviewPeaks(path, desiredPeaks);
+
+                    // MP4 / M4A 若系統無法解碼，就用壓縮資料產生視覺化預覽。
+                    if (ext == ".mp4" || ext == ".m4a")
+                        return BuildCompressedBytePreviewPeaks(path, desiredPeaks);
+
+                    return mfPeaks == null ? new float[0] : mfPeaks;
+                }
+                catch
+                {
+                    try
+                    {
+                        if (ext == ".mp3")
+                            return BuildMp3FramePreviewPeaks(path, desiredPeaks);
+
+                        if (ext == ".mp4" || ext == ".m4a")
+                            return BuildCompressedBytePreviewPeaks(path, desiredPeaks);
+                    }
+                    catch
+                    {
+                    }
+
+                    return new float[0];
+                }
+            }
+
+            private static bool HasUsefulPeaks(float[] peaks)
+            {
+                if (peaks == null || peaks.Length == 0)
+                    return false;
+
+                for (int i = 0; i < peaks.Length; i++)
+                {
+                    if (peaks[i] > 0.0001f)
+                        return true;
+                }
+
+                return false;
+            }
+
+            private struct Mp3FrameInfo
+            {
+                public int VersionId;
+                public int Layer;
+                public int BitRate;
+                public int SampleRate;
+                public int SamplesPerFrame;
+                public int FrameLength;
+                public int ChannelMode;
+            }
+
+            private static float[] BuildMp3FramePreviewPeaks(string path, int desiredPeaks)
+            {
+                try
+                {
+                    List<float> frameEnergy = new List<float>();
+
+                    using (FileStream fs = File.OpenRead(path))
+                    using (BinaryReader br = new BinaryReader(fs))
+                    {
+                        fs.Position = SkipId3v2ForPreview(br, fs.Length);
+
+                        while (fs.Position + 4 < fs.Length && frameEnergy.Count < 300000)
+                        {
+                            long frameStart = fs.Position;
+                            uint header = ReadUInt32BEForPreview(br);
+                            Mp3FrameInfo info;
+
+                            if (TryParseMp3Frame(header, out info) &&
+                                info.FrameLength >= 8 &&
+                                frameStart + info.FrameLength <= fs.Length)
+                            {
+                                int payloadLength = info.FrameLength - 4;
+                                byte[] payload = br.ReadBytes(payloadLength);
+
+                                if (payload.Length > 0)
+                                {
+                                    int skip = GetMp3SideInfoSkip(info);
+
+                                    if (skip >= payload.Length)
+                                        skip = 0;
+
+                                    frameEnergy.Add(CompressedEnergy(payload, skip));
+                                }
+
+                                fs.Position = frameStart + info.FrameLength;
+                            }
+                            else
+                            {
+                                fs.Position = frameStart + 1;
+                            }
+                        }
+                    }
+
+                    if (frameEnergy.Count == 0)
+                        return new float[0];
+
+                    return ResamplePreviewPeaks(frameEnergy, desiredPeaks);
+                }
+                catch
+                {
+                    return new float[0];
+                }
+            }
+
+            private static long SkipId3v2ForPreview(BinaryReader br, long length)
+            {
+                try
+                {
+                    if (length < 10)
+                        return 0;
+
+                    br.BaseStream.Position = 0;
+                    byte[] tag = br.ReadBytes(3);
+
+                    if (tag.Length == 3 && tag[0] == 'I' && tag[1] == 'D' && tag[2] == '3')
+                    {
+                        br.ReadByte();
+                        br.ReadByte();
+                        byte flags = br.ReadByte();
+                        byte[] sizeBytes = br.ReadBytes(4);
+
+                        if (sizeBytes.Length == 4)
+                        {
+                            int size = ((sizeBytes[0] & 0x7F) << 21) |
+                                       ((sizeBytes[1] & 0x7F) << 14) |
+                                       ((sizeBytes[2] & 0x7F) << 7) |
+                                       (sizeBytes[3] & 0x7F);
+
+                            long total = 10L + size;
+
+                            if ((flags & 0x10) != 0)
+                                total += 10;
+
+                            if (total > 0 && total < length)
+                                return total;
+                        }
+                    }
+                }
+                catch
+                {
+                }
+
+                return 0;
+            }
+
+            private static uint ReadUInt32BEForPreview(BinaryReader br)
+            {
+                byte[] b = br.ReadBytes(4);
+
+                if (b.Length < 4)
+                    return 0;
+
+                return ((uint)b[0] << 24) |
+                       ((uint)b[1] << 16) |
+                       ((uint)b[2] << 8) |
+                       b[3];
+            }
+
+            private static bool TryParseMp3Frame(uint header, out Mp3FrameInfo info)
+            {
+                info = new Mp3FrameInfo();
+
+                if ((header & 0xFFE00000) != 0xFFE00000)
+                    return false;
+
+                int versionId = (int)((header >> 19) & 0x3);
+                int layer = (int)((header >> 17) & 0x3);
+                int bitRateIndex = (int)((header >> 12) & 0xF);
+                int sampleRateIndex = (int)((header >> 10) & 0x3);
+                int padding = (int)((header >> 9) & 0x1);
+                int channelMode = (int)((header >> 6) & 0x3);
+
+                if (versionId == 1 || layer == 0 || bitRateIndex == 0 || bitRateIndex == 15 || sampleRateIndex == 3)
+                    return false;
+
+                int bitRate = GetMp3BitRateForPreview(versionId, layer, bitRateIndex);
+                int sampleRate = GetMp3SampleRateForPreview(versionId, sampleRateIndex);
+
+                if (bitRate <= 0 || sampleRate <= 0)
+                    return false;
+
+                int samplesPerFrame;
+                int frameLength;
+
+                if (layer == 3) // Layer I
+                {
+                    samplesPerFrame = 384;
+                    frameLength = ((12 * bitRate / sampleRate) + padding) * 4;
+                }
+                else if (layer == 2) // Layer II
+                {
+                    samplesPerFrame = 1152;
+                    frameLength = 144 * bitRate / sampleRate + padding;
+                }
+                else // Layer III
+                {
+                    samplesPerFrame = versionId == 3 ? 1152 : 576;
+
+                    if (versionId == 3)
+                        frameLength = 144 * bitRate / sampleRate + padding;
+                    else
+                        frameLength = 72 * bitRate / sampleRate + padding;
+                }
+
+                if (frameLength < 8)
+                    return false;
+
+                info.VersionId = versionId;
+                info.Layer = layer;
+                info.BitRate = bitRate;
+                info.SampleRate = sampleRate;
+                info.SamplesPerFrame = samplesPerFrame;
+                info.FrameLength = frameLength;
+                info.ChannelMode = channelMode;
+                return true;
+            }
+
+            private static int GetMp3BitRateForPreview(int versionId, int layer, int index)
+            {
+                int[] mpeg1Layer1 = { 0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0 };
+                int[] mpeg1Layer2 = { 0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0 };
+                int[] mpeg1Layer3 = { 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0 };
+                int[] mpeg2Layer1 = { 0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 0 };
+                int[] mpeg2Layer23 = { 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0 };
+
+                int kbps;
+
+                if (versionId == 3)
+                {
+                    if (layer == 3)
+                        kbps = mpeg1Layer1[index];
+                    else if (layer == 2)
+                        kbps = mpeg1Layer2[index];
+                    else
+                        kbps = mpeg1Layer3[index];
+                }
+                else
+                {
+                    if (layer == 3)
+                        kbps = mpeg2Layer1[index];
+                    else
+                        kbps = mpeg2Layer23[index];
+                }
+
+                return kbps * 1000;
+            }
+
+            private static int GetMp3SampleRateForPreview(int versionId, int index)
+            {
+                int[,] table = new int[,]
+                {
+                    { 11025, 12000, 8000 },
+                    { 0, 0, 0 },
+                    { 22050, 24000, 16000 },
+                    { 44100, 48000, 32000 }
+                };
+
+                return table[versionId, index];
+            }
+
+            private static int GetMp3SideInfoSkip(Mp3FrameInfo info)
+            {
+                // payload 不包含 4 bytes header，因此這裡只跳過 side-info，不再加 header 長度。
+                // Layer III 的 side-info 長度：MPEG1 mono 17 / stereo 32；MPEG2/2.5 mono 9 / stereo 17。
+                // 加上一點保守值，讓預覽比較不受 frame header/side-info 影響。
+                if (info.Layer != 1)
+                    return 0;
+
+                bool mono = info.ChannelMode == 3;
+
+                if (info.VersionId == 3)
+                    return mono ? 17 : 32;
+
+                return mono ? 9 : 17;
+            }
+
+            private static float CompressedEnergy(byte[] data, int start)
+            {
+                if (data == null || data.Length == 0)
+                    return 0;
+
+                start = Math.Max(0, Math.Min(start, data.Length - 1));
+
+                int length = data.Length - start;
+                int step = Math.Max(1, length / 220);
+                int count = 0;
+                int previous = 128;
+                double sum = 0;
+                double diff = 0;
+
+                for (int i = start; i < data.Length; i += step)
+                {
+                    int v = data[i];
+                    double centered = (v - 128) / 128.0;
+                    sum += centered * centered;
+                    diff += Math.Abs(v - previous) / 255.0;
+                    previous = v;
+                    count++;
+                }
+
+                if (count == 0)
+                    return 0;
+
+                double rms = Math.Sqrt(sum / count);
+                double movement = diff / count;
+                double value = rms * 0.72 + movement * 0.28;
+
+                if (value < 0.02)
+                    value = 0.02;
+                if (value > 1.0)
+                    value = 1.0;
+
+                return (float)value;
+            }
+
+            private static float[] BuildCompressedBytePreviewPeaks(string path, int desiredPeaks)
+            {
+                try
+                {
+                    using (FileStream fs = File.OpenRead(path))
+                    {
+                        if (fs.Length <= 0)
+                            return new float[0];
+
+                        int peakCount = Math.Max(1, desiredPeaks);
+                        peakCount = (int)Math.Min(peakCount, Math.Max(1, fs.Length / 512));
+                        float[] peaks = new float[peakCount];
+                        byte[] buffer = new byte[4096];
+
+                        for (int i = 0; i < peakCount; i++)
+                        {
+                            long start = i * fs.Length / peakCount;
+                            long end = (i + 1) * fs.Length / peakCount;
+                            long length = Math.Max(1, end - start);
+                            long step = Math.Max(1, length / buffer.Length);
+                            int count = 0;
+                            double sum = 0;
+                            int previous = 128;
+                            double diff = 0;
+
+                            for (long pos = start; pos < end; pos += step)
+                            {
+                                fs.Position = pos;
+                                int b = fs.ReadByte();
+
+                                if (b < 0)
+                                    break;
+
+                                double centered = (b - 128) / 128.0;
+                                sum += centered * centered;
+                                diff += Math.Abs(b - previous) / 255.0;
+                                previous = b;
+                                count++;
+                            }
+
+                            if (count > 0)
+                            {
+                                double rms = Math.Sqrt(sum / count);
+                                double movement = diff / count;
+                                peaks[i] = (float)Math.Max(0.02, Math.Min(1.0, rms * 0.72 + movement * 0.28));
+                            }
+                        }
+
+                        return NormalizePreviewPeaks(peaks);
+                    }
+                }
+                catch
+                {
+                    return new float[0];
+                }
+            }
+
+            private static float[] ResamplePreviewPeaks(List<float> source, int desiredPeaks)
+            {
+                if (source == null || source.Count == 0)
+                    return new float[0];
+
+                int peakCount = Math.Max(1, Math.Min(desiredPeaks, source.Count));
+                float[] peaks = new float[peakCount];
+
+                for (int i = 0; i < peakCount; i++)
+                {
+                    int start = i * source.Count / peakCount;
+                    int end = (i + 1) * source.Count / peakCount;
+
+                    if (end <= start)
+                        end = start + 1;
+
+                    float max = 0;
+
+                    for (int j = start; j < end && j < source.Count; j++)
+                    {
+                        if (source[j] > max)
+                            max = source[j];
+                    }
+
+                    peaks[i] = max;
+                }
+
+                SmoothPreviewPeaks(peaks);
+                return NormalizePreviewPeaks(peaks);
+            }
+
+            private static void SmoothPreviewPeaks(float[] peaks)
+            {
+                if (peaks == null || peaks.Length < 3)
+                    return;
+
+                float previous = peaks[0];
+
+                for (int i = 1; i < peaks.Length - 1; i++)
+                {
+                    float current = peaks[i];
+                    peaks[i] = previous * 0.25f + current * 0.50f + peaks[i + 1] * 0.25f;
+                    previous = current;
+                }
+            }
+
+            private static float[] NormalizePreviewPeaks(float[] peaks)
+            {
+                if (peaks == null || peaks.Length == 0)
+                    return new float[0];
+
+                float min = float.MaxValue;
+                float max = float.MinValue;
+
+                for (int i = 0; i < peaks.Length; i++)
+                {
+                    if (peaks[i] < min)
+                        min = peaks[i];
+                    if (peaks[i] > max)
+                        max = peaks[i];
+                }
+
+                if (max <= 0)
+                    return peaks;
+
+                float range = max - min;
+
+                for (int i = 0; i < peaks.Length; i++)
+                {
+                    float value;
+
+                    if (range > 0.015f)
+                        value = 0.08f + ((peaks[i] - min) / range) * 0.86f;
+                    else
+                        value = 0.18f + (peaks[i] / max) * 0.62f;
+
+                    if (value < 0.03f)
+                        value = 0.03f;
+                    if (value > 0.98f)
+                        value = 0.98f;
+
+                    peaks[i] = value;
+                }
+
+                return peaks;
+            }
+
+            private static float[] BuildWavPeaks(string path, int desiredPeaks)
+            {
                 try
                 {
                     WaveInfo info = WaveInfo.Read(path);
@@ -2801,7 +4046,7 @@ namespace _1113354_陳冠瑋
                                     if (offset + bytesPerSample > frame.Length)
                                         continue;
 
-                                    float sample = Math.Abs(ReadSample(frame, offset, info));
+                                    float sample = Math.Abs(ReadSample(frame, offset, info.AudioFormat, info.BitsPerSample));
 
                                     if (sample > max)
                                         max = sample;
@@ -2823,22 +4068,22 @@ namespace _1113354_陳冠瑋
                 }
             }
 
-            private static float ReadSample(byte[] frame, int offset, WaveInfo info)
+            internal static float ReadSample(byte[] data, int offset, short audioFormat, short bitsPerSample)
             {
-                if (info.AudioFormat == 3 && info.BitsPerSample == 32)
-                    return BitConverter.ToSingle(frame, offset);
+                if (audioFormat == 3 && bitsPerSample == 32)
+                    return BitConverter.ToSingle(data, offset);
 
-                if (info.BitsPerSample == 8)
-                    return (frame[offset] - 128) / 128f;
+                if (bitsPerSample == 8)
+                    return (data[offset] - 128) / 128f;
 
-                if (info.BitsPerSample == 16)
-                    return BitConverter.ToInt16(frame, offset) / 32768f;
+                if (bitsPerSample == 16)
+                    return BitConverter.ToInt16(data, offset) / 32768f;
 
-                if (info.BitsPerSample == 24)
+                if (bitsPerSample == 24)
                 {
-                    int value = frame[offset] |
-                                (frame[offset + 1] << 8) |
-                                (frame[offset + 2] << 16);
+                    int value = data[offset] |
+                                (data[offset + 1] << 8) |
+                                (data[offset + 2] << 16);
 
                     if ((value & 0x800000) != 0)
                         value |= unchecked((int)0xFF000000);
@@ -2846,10 +4091,378 @@ namespace _1113354_陳冠瑋
                     return value / 8388608f;
                 }
 
-                if (info.BitsPerSample == 32)
-                    return BitConverter.ToInt32(frame, offset) / 2147483648f;
+                if (bitsPerSample == 32)
+                    return BitConverter.ToInt32(data, offset) / 2147483648f;
 
                 return 0;
+            }
+        }
+
+        private static class MediaFoundationAudio
+        {
+            private const int MF_VERSION = 0x00020070;
+            private const int MF_SOURCE_READERF_ENDOFSTREAM = 0x00000002;
+            private const int MF_SOURCE_READER_CONTROLF_NONE = 0x00000000;
+            private static readonly int MF_SOURCE_READER_FIRST_AUDIO_STREAM = unchecked((int)0xFFFFFFFD);
+            private static readonly int MF_SOURCE_READER_ALL_STREAMS = unchecked((int)0xFFFFFFFE);
+
+            private static readonly Guid MFMediaType_Audio = new Guid("73647561-0000-0010-8000-00AA00389B71");
+            private static readonly Guid MFAudioFormat_PCM = new Guid("00000001-0000-0010-8000-00AA00389B71");
+            private static readonly Guid MF_MT_MAJOR_TYPE = new Guid("48eba18e-f8c9-4687-bf11-0a74c9f96a8f");
+            private static readonly Guid MF_MT_SUBTYPE = new Guid("f7e34c9a-42e8-4714-b74b-cb29d72c35e5");
+            private static readonly Guid MF_MT_AUDIO_NUM_CHANNELS = new Guid("37e48bf5-645e-4c5b-89de-ada9e29b696a");
+            private static readonly Guid MF_MT_AUDIO_SAMPLES_PER_SECOND = new Guid("5faeeae7-0290-4c31-9e8a-c534d09d4acb");
+            private static readonly Guid MF_MT_AUDIO_BITS_PER_SAMPLE = new Guid("f2deb57f-40fa-4764-aa33-ed4f2d1ff669");
+
+            [DllImport("mfplat.dll", ExactSpelling = true)]
+            private static extern int MFStartup(int version, int dwFlags);
+
+            [DllImport("mfplat.dll", ExactSpelling = true)]
+            private static extern int MFShutdown();
+
+            [DllImport("mfplat.dll", ExactSpelling = true)]
+            private static extern int MFCreateMediaType(out IMFMediaType ppMFType);
+
+            [DllImport("mfreadwrite.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
+            private static extern int MFCreateSourceReaderFromURL(string pwszURL, IMFAttributes pAttributes, out IMFSourceReader ppSourceReader);
+
+            public static AudioInfo ReadInfo(string path)
+            {
+                IMFSourceReader reader = null;
+                IMFMediaType currentType = null;
+                bool started = false;
+
+                try
+                {
+                    Check(MFStartup(MF_VERSION, 0), "MFStartup");
+                    started = true;
+
+                    Check(MFCreateSourceReaderFromURL(path, null, out reader), "MFCreateSourceReaderFromURL");
+                    ConfigurePcm(reader);
+
+                    Check(reader.GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, out currentType), "GetCurrentMediaType");
+
+                    AudioInfo info = new AudioInfo();
+                    info.Channels = (short)GetUInt32(currentType, MF_MT_AUDIO_NUM_CHANNELS, 0);
+                    info.SampleRate = GetUInt32(currentType, MF_MT_AUDIO_SAMPLES_PER_SECOND, 0);
+                    info.BitsPerSample = (short)GetUInt32(currentType, MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+                    info.DurationMs = MciAudioInfo.GetDurationMs(path);
+                    info.FormatName = AudioInfo.GuessFormatName(path);
+                    return info;
+                }
+                finally
+                {
+                    Release(currentType);
+                    Release(reader);
+
+                    if (started)
+                        MFShutdown();
+                }
+            }
+
+            public static float[] BuildPeaks(string path, int desiredPeaks)
+            {
+                IMFSourceReader reader = null;
+                IMFMediaType currentType = null;
+                IMFSample sample = null;
+                IMFMediaBuffer mediaBuffer = null;
+                bool started = false;
+
+                try
+                {
+                    Check(MFStartup(MF_VERSION, 0), "MFStartup");
+                    started = true;
+
+                    Check(MFCreateSourceReaderFromURL(path, null, out reader), "MFCreateSourceReaderFromURL");
+                    ConfigurePcm(reader);
+
+                    Check(reader.GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, out currentType), "GetCurrentMediaType");
+
+                    int channels = Math.Max(1, GetUInt32(currentType, MF_MT_AUDIO_NUM_CHANNELS, 1));
+                    int sampleRate = Math.Max(1, GetUInt32(currentType, MF_MT_AUDIO_SAMPLES_PER_SECOND, 44100));
+                    int bitsPerSample = GetUInt32(currentType, MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+
+                    if (bitsPerSample != 8 && bitsPerSample != 16 && bitsPerSample != 24 && bitsPerSample != 32)
+                        bitsPerSample = 16;
+
+                    int bytesPerSample = Math.Max(1, bitsPerSample / 8);
+                    int blockAlign = Math.Max(1, channels * bytesPerSample);
+                    long durationMs = MciAudioInfo.GetDurationMs(path);
+                    long totalFrames = durationMs > 0 ? durationMs * sampleRate / 1000 : sampleRate * 60L;
+
+                    if (totalFrames <= 0)
+                        totalFrames = sampleRate * 60L;
+
+                    int peakCount = (int)Math.Min(desiredPeaks, totalFrames);
+                    peakCount = Math.Max(1, peakCount);
+
+                    float[] peaks = new float[peakCount];
+                    long frameIndex = 0;
+
+                    while (true)
+                    {
+                        Release(mediaBuffer);
+                        mediaBuffer = null;
+                        Release(sample);
+                        sample = null;
+
+                        int actualStreamIndex;
+                        int streamFlags;
+                        long timestamp;
+
+                        Check(reader.ReadSample(
+                            MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+                            MF_SOURCE_READER_CONTROLF_NONE,
+                            out actualStreamIndex,
+                            out streamFlags,
+                            out timestamp,
+                            out sample), "ReadSample");
+
+                        if ((streamFlags & MF_SOURCE_READERF_ENDOFSTREAM) != 0)
+                            break;
+
+                        if (sample == null)
+                            continue;
+
+                        Check(sample.ConvertToContiguousBuffer(out mediaBuffer), "ConvertToContiguousBuffer");
+
+                        IntPtr audioData;
+                        int maxLength;
+                        int currentLength;
+
+                        Check(mediaBuffer.Lock(out audioData, out maxLength, out currentLength), "MediaBuffer.Lock");
+
+                        try
+                        {
+                            if (currentLength <= 0)
+                                continue;
+
+                            byte[] bytes = new byte[currentLength];
+                            Marshal.Copy(audioData, bytes, 0, currentLength);
+
+                            int frames = currentLength / blockAlign;
+
+                            for (int frame = 0; frame < frames; frame++)
+                            {
+                                int peakIndex = (int)(frameIndex * peakCount / totalFrames);
+
+                                if (peakIndex < 0)
+                                    peakIndex = 0;
+                                if (peakIndex >= peakCount)
+                                    peakIndex = peakCount - 1;
+
+                                float max = 0;
+                                int frameOffset = frame * blockAlign;
+
+                                for (int ch = 0; ch < channels; ch++)
+                                {
+                                    int offset = frameOffset + ch * bytesPerSample;
+
+                                    if (offset + bytesPerSample > bytes.Length)
+                                        continue;
+
+                                    float value = Math.Abs(WaveformAnalyzer.ReadSample(bytes, offset, 1, (short)bitsPerSample));
+
+                                    if (value > max)
+                                        max = value;
+                                }
+
+                                if (max > 1)
+                                    max = 1;
+
+                                if (max > peaks[peakIndex])
+                                    peaks[peakIndex] = max;
+
+                                frameIndex++;
+                            }
+                        }
+                        finally
+                        {
+                            mediaBuffer.Unlock();
+                        }
+                    }
+
+                    return peaks;
+                }
+                catch
+                {
+                    return new float[0];
+                }
+                finally
+                {
+                    Release(mediaBuffer);
+                    Release(sample);
+                    Release(currentType);
+                    Release(reader);
+
+                    if (started)
+                        MFShutdown();
+                }
+            }
+
+            private static void ConfigurePcm(IMFSourceReader reader)
+            {
+                IMFMediaType mediaType = null;
+
+                try
+                {
+                    reader.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, false);
+                    reader.SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, true);
+
+                    Check(MFCreateMediaType(out mediaType), "MFCreateMediaType");
+                    SetGuid(mediaType, MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+                    SetGuid(mediaType, MF_MT_SUBTYPE, MFAudioFormat_PCM);
+
+                    Check(reader.SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, IntPtr.Zero, mediaType), "SetCurrentMediaType");
+                }
+                finally
+                {
+                    Release(mediaType);
+                }
+            }
+
+            private static void SetGuid(IMFAttributes attributes, Guid key, Guid value)
+            {
+                Guid localKey = key;
+                Guid localValue = value;
+                Check(attributes.SetGUID(ref localKey, ref localValue), "SetGUID");
+            }
+
+            private static int GetUInt32(IMFAttributes attributes, Guid key, int defaultValue)
+            {
+                try
+                {
+                    Guid localKey = key;
+                    int value;
+                    int hr = attributes.GetUINT32(ref localKey, out value);
+
+                    if (hr < 0)
+                        return defaultValue;
+
+                    return value;
+                }
+                catch
+                {
+                    return defaultValue;
+                }
+            }
+
+            private static void Check(int hr, string action)
+            {
+                if (hr < 0)
+                    Marshal.ThrowExceptionForHR(hr);
+            }
+
+            private static void Release(object obj)
+            {
+                if (obj != null && Marshal.IsComObject(obj))
+                {
+                    try
+                    {
+                        Marshal.ReleaseComObject(obj);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+
+            [ComImport]
+            [Guid("2CD2D921-C447-44A7-A13C-4ADABFC247E3")]
+            [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            private interface IMFAttributes
+            {
+                [PreserveSig] int GetItem(ref Guid guidKey, IntPtr pValue);
+                [PreserveSig] int GetItemType(ref Guid guidKey, out int pType);
+                [PreserveSig] int CompareItem(ref Guid guidKey, IntPtr value, [MarshalAs(UnmanagedType.Bool)] out bool pbResult);
+                [PreserveSig] int Compare(IMFAttributes pTheirs, int matchType, [MarshalAs(UnmanagedType.Bool)] out bool pbResult);
+                [PreserveSig] int GetUINT32(ref Guid guidKey, out int punValue);
+                [PreserveSig] int GetUINT64(ref Guid guidKey, out long punValue);
+                [PreserveSig] int GetDouble(ref Guid guidKey, out double pfValue);
+                [PreserveSig] int GetGUID(ref Guid guidKey, out Guid pguidValue);
+                [PreserveSig] int GetStringLength(ref Guid guidKey, out int pcchLength);
+                [PreserveSig] int GetString(ref Guid guidKey, [MarshalAs(UnmanagedType.LPWStr)] StringBuilder pwszValue, int cchBufSize, out int pcchLength);
+                [PreserveSig] int GetAllocatedString(ref Guid guidKey, out IntPtr ppwszValue, out int pcchLength);
+                [PreserveSig] int GetBlobSize(ref Guid guidKey, out int pcbBlobSize);
+                [PreserveSig] int GetBlob(ref Guid guidKey, byte[] pBuf, int cbBufSize, out int pcbBlobSize);
+                [PreserveSig] int GetAllocatedBlob(ref Guid guidKey, out IntPtr ip, out int pcbSize);
+                [PreserveSig] int InitFromBlob(byte[] pBuf, int cbBufSize);
+                [PreserveSig] int SetItem(ref Guid guidKey, IntPtr value);
+                [PreserveSig] int DeleteItem(ref Guid guidKey);
+                [PreserveSig] int DeleteAllItems();
+                [PreserveSig] int SetUINT32(ref Guid guidKey, int unValue);
+                [PreserveSig] int SetUINT64(ref Guid guidKey, long unValue);
+                [PreserveSig] int SetDouble(ref Guid guidKey, double fValue);
+                [PreserveSig] int SetGUID(ref Guid guidKey, ref Guid guidValue);
+                [PreserveSig] int SetString(ref Guid guidKey, [MarshalAs(UnmanagedType.LPWStr)] string wszValue);
+                [PreserveSig] int SetBlob(ref Guid guidKey, byte[] pBuf, int cbBufSize);
+                [PreserveSig] int LockStore();
+                [PreserveSig] int UnlockStore();
+                [PreserveSig] int GetCount(out int pcItems);
+                [PreserveSig] int GetItemByIndex(int unIndex, out Guid pguidKey, IntPtr pValue);
+                [PreserveSig] int CopyAllItems(IMFAttributes pDest);
+            }
+
+            [ComImport]
+            [Guid("44AE0FA8-EA31-4109-8D2E-4CAE4997C555")]
+            [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            private interface IMFMediaType : IMFAttributes
+            {
+                [PreserveSig] int GetMajorType(out Guid pguidMajorType);
+                [PreserveSig] int IsCompressedFormat([MarshalAs(UnmanagedType.Bool)] out bool pfCompressed);
+                [PreserveSig] int IsEqual(IMFMediaType pIMediaType, out int pdwFlags);
+                [PreserveSig] int GetRepresentation(ref Guid guidRepresentation, out IntPtr ppvRepresentation);
+                [PreserveSig] int FreeRepresentation(ref Guid guidRepresentation, IntPtr pvRepresentation);
+            }
+
+            [ComImport]
+            [Guid("70ae66f2-c809-4e4f-8915-bdcb406b7993")]
+            [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            private interface IMFSourceReader
+            {
+                [PreserveSig] int GetStreamSelection(int dwStreamIndex, [MarshalAs(UnmanagedType.Bool)] out bool pfSelected);
+                [PreserveSig] int SetStreamSelection(int dwStreamIndex, [MarshalAs(UnmanagedType.Bool)] bool fSelected);
+                [PreserveSig] int GetNativeMediaType(int dwStreamIndex, int dwMediaTypeIndex, out IMFMediaType ppMediaType);
+                [PreserveSig] int GetCurrentMediaType(int dwStreamIndex, out IMFMediaType ppMediaType);
+                [PreserveSig] int SetCurrentMediaType(int dwStreamIndex, IntPtr pdwReserved, IMFMediaType pMediaType);
+                [PreserveSig] int SetCurrentPosition(ref Guid guidTimeFormat, IntPtr varPosition);
+                [PreserveSig] int ReadSample(int dwStreamIndex, int dwControlFlags, out int pdwActualStreamIndex, out int pdwStreamFlags, out long pllTimestamp, out IMFSample ppSample);
+                [PreserveSig] int Flush(int dwStreamIndex);
+                [PreserveSig] int GetServiceForStream(int dwStreamIndex, ref Guid guidService, ref Guid riid, out IntPtr ppvObject);
+                [PreserveSig] int GetPresentationAttribute(int dwStreamIndex, ref Guid guidAttribute, IntPtr pvarAttribute);
+            }
+
+            [ComImport]
+            [Guid("c40a00f2-b93a-4d80-ae8c-5a1c634f58e4")]
+            [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            private interface IMFSample : IMFAttributes
+            {
+                [PreserveSig] int GetSampleFlags(out int pdwSampleFlags);
+                [PreserveSig] int SetSampleFlags(int dwSampleFlags);
+                [PreserveSig] int GetSampleTime(out long phnsSampleTime);
+                [PreserveSig] int SetSampleTime(long hnsSampleTime);
+                [PreserveSig] int GetSampleDuration(out long phnsSampleDuration);
+                [PreserveSig] int SetSampleDuration(long hnsSampleDuration);
+                [PreserveSig] int GetBufferCount(out int pdwBufferCount);
+                [PreserveSig] int GetBufferByIndex(int dwIndex, out IMFMediaBuffer ppBuffer);
+                [PreserveSig] int ConvertToContiguousBuffer(out IMFMediaBuffer ppBuffer);
+                [PreserveSig] int AddBuffer(IMFMediaBuffer pBuffer);
+                [PreserveSig] int RemoveBufferByIndex(int dwIndex);
+                [PreserveSig] int RemoveAllBuffers();
+                [PreserveSig] int GetTotalLength(out int pcbTotalLength);
+                [PreserveSig] int CopyToBuffer(IMFMediaBuffer pBuffer);
+            }
+
+            [ComImport]
+            [Guid("045FA593-8799-42B8-BC8D-8968C6453507")]
+            [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            private interface IMFMediaBuffer
+            {
+                [PreserveSig] int Lock(out IntPtr ppbBuffer, out int pcbMaxLength, out int pcbCurrentLength);
+                [PreserveSig] int Unlock();
+                [PreserveSig] int GetCurrentLength(out int pcbCurrentLength);
+                [PreserveSig] int SetCurrentLength(int cbCurrentLength);
+                [PreserveSig] int GetMaxLength(out int pcbMaxLength);
             }
         }
 
@@ -3193,7 +4806,7 @@ namespace _1113354_陳冠瑋
 
                 if (_peaks.Length == 0)
                 {
-                    DrawCenterText(e.Graphics, "此 WAV 無法產生波形預覽");
+                    DrawCenterText(e.Graphics, "此檔案無法產生波形預覽");
                     return;
                 }
 
