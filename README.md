@@ -9,8 +9,6 @@
 
 ## 畫面截圖
 
-> 以下區塊預留給專案截圖，之後可以把圖片放到 `docs/screenshots/` 資料夾，再修改圖片路徑。
-
 ### 主畫面
 
 ![主畫面](docs/screenshots/01-main.png)
